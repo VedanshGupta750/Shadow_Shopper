@@ -35,7 +35,7 @@ const tokensStyle: React.CSSProperties = {
   maxHeight: 200,
   overflowY: "auto",
   margin: 0,
-  fontFamily: "ui-monospace, monospace",
+  fontFamily: "var(--font-mono)",
 };
 
 const verdictStyle: React.CSSProperties = {

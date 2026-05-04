@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Project design tokens — referenced as bg-bg, text-text, border-border, etc. */
+@theme {
+  --color-bg: #0A0A0A;
+  --color-surface: #121212;
+  --color-surface-2: #1A1A1A;
+  --color-border: #2A2A2A;
+  --color-text: #F5F5F5;
+  --color-muted: #999999;
+  --color-accent: #7CFFB2;
+  --color-warn: #F5C26B;
+  --color-danger: #FF6B6B;
+  --font-display: "Geist", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+}
+
+/*
+ * shadcn/ui (new-york, base color: stone) tokens.
+ * Mapped to our dark palette so shadcn components render on the project bg without restyling.
+ * These map shadcn's semantic names (background, foreground, card, ...) onto our raw tokens.
+ */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted-shadcn: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent-shadcn: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-border-shadcn: var(--border);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: #0A0A0A;
+  --foreground: #F5F5F5;
+  --card: #121212;
+  --card-foreground: #F5F5F5;
+  --popover: #1A1A1A;
+  --popover-foreground: #F5F5F5;
+  --primary: #F5F5F5;
+  --primary-foreground: #0A0A0A;
+  --secondary: #2A2A2A;
+  --secondary-foreground: #F5F5F5;
+  --muted: #1A1A1A;
+  --muted-foreground: #999999;
+  --accent: #2A2A2A;
+  --accent-foreground: #F5F5F5;
+  --destructive: #FF6B6B;
+  --destructive-foreground: #0A0A0A;
+  --border: #2A2A2A;
+  --input: #2A2A2A;
+  --ring: #7CFFB2;
+  color-scheme: dark;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-display);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+  }
+}

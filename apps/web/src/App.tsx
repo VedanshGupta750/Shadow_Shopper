@@ -2,17 +2,16 @@ import { useCallback } from "react";
 import { UrlBar } from "./components/UrlBar";
 import { PersonaCard } from "./components/PersonaCard";
 import { SurfacingGrid } from "./components/SurfacingGrid";
+import { AppHeader } from "./components/AppHeader";
+import { NoiseOverlay } from "./components/NoiseOverlay";
 import { usePersonaStream } from "./hooks/usePersonaStream";
 import { PERSONA_METADATA } from "./lib/personaMetadata";
 import type { Severity, SynthesisReport } from "./types/sse";
 
 const pageStyle: React.CSSProperties = {
-  fontFamily: "system-ui, sans-serif",
   maxWidth: 1500,
   margin: "0 auto",
   padding: "24px",
-  background: "#fafafa",
-  minHeight: "100vh",
 };
 
 const headerStyle: React.CSSProperties = {
@@ -193,7 +192,10 @@ function App() {
   }, [cancel]);
 
   return (
-    <div style={pageStyle}>
+    <div className="min-h-screen bg-bg text-text font-display">
+      <NoiseOverlay />
+      <AppHeader />
+      <div style={pageStyle}>
       <div style={headerStyle}>
         <h1 style={{ margin: 0 }}>Shadow Shopper</h1>
         <span style={{ color: "#666", fontSize: 14 }}>
@@ -240,12 +242,13 @@ function App() {
         {state.synthesis.report ? (
           <ReportView report={state.synthesis.report} />
         ) : state.synthesis.tokens ? (
-          <pre style={{ whiteSpace: "pre-wrap", fontFamily: "ui-monospace, monospace", fontSize: 11 }}>
+          <pre className="font-mono" style={{ whiteSpace: "pre-wrap", fontSize: 11 }}>
             {state.synthesis.tokens}
           </pre>
         ) : (
           <span style={{ color: "#888" }}>(synthesis appears here after personas finish)</span>
         )}
+      </div>
       </div>
     </div>
   );
