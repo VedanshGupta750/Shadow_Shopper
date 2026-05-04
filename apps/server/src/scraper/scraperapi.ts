@@ -1,0 +1,260 @@
+import axios, { type AxiosInstance } from "axios";
+import pLimit from "p-limit";
+import pRetry, { AbortError } from "p-retry";
+import { z } from "zod";
+import { env } from "../env.js";
+import { logger } from "../logger.js";
+import { ValidationError, UpstreamError } from "../errors.js";
+import type { AmazonProduct, AmazonReview, AmazonSearchResult } from "../types/amazon.js";
+
+const ASIN_RE = /^[A-Z0-9]{10}$/;
+
+const limit = pLimit(5);
+
+function createClient(): AxiosInstance {
+  return axios.create({
+    baseURL: "https://api.scraperapi.com/structured/amazon",
+    timeout: 70_000,
+    params: {
+      api_key: env.SCRAPERAPI_KEY,
+      country_code: "us",
+      tld: "com",
+    },
+  });
+}
+
+let _client: AxiosInstance | undefined;
+function getClient(): AxiosInstance {
+  if (!_client) _client = createClient();
+  return _client;
+}
+
+function isRetryable(error: unknown): boolean {
+  if (axios.isAxiosError(error)) {
+    if (!error.response) return true;
+    return error.response.status >= 500;
+  }
+  return false;
+}
+
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  return pRetry(
+    async () => {
+      try {
+        return await fn();
+      } catch (error) {
+        if (!isRetryable(error)) throw new AbortError(error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      }
+    },
+    { retries: 2, factor: 2, minTimeout: 800 },
+  );
+}
+
+// -- Zod schemas for raw ScraperAPI responses --
+
+const rawProductSchema = z
+  .object({
+    name: z.string(),
+    brand: z.string().default("Unknown"),
+    pricing: z.string().optional(),
+    list_price: z.string().optional(),
+    average_rating: z.number().optional(),
+    total_reviews: z.number().optional(),
+    feature_bullets: z.array(z.string()).default([]),
+    full_description: z.string().optional(),
+    images: z.array(z.string()).default([]),
+    product_information: z.record(z.string(), z.string()).optional(),
+    availability_status: z.string().optional(),
+  })
+  .passthrough();
+
+const rawReviewSchema = z
+  .object({
+    id: z.string(),
+    title: z.string().default(""),
+    body: z.string().default(""),
+    rating: z.number(),
+    profile: z
+      .object({ name: z.string().default("Anonymous") })
+      .passthrough()
+      .default({ name: "Anonymous" }),
+    verified_purchase: z.boolean().default(false),
+    date: z
+      .object({ date: z.string().optional(), unix: z.number().optional() })
+      .passthrough()
+      .optional(),
+    helpful_votes: z.number().optional(),
+  })
+  .passthrough();
+
+const rawReviewsResponseSchema = z
+  .object({
+    reviews: z.array(rawReviewSchema).default([]),
+  })
+  .passthrough();
+
+const rawSearchItemSchema = z
+  .object({
+    type: z.string().optional(),
+    asin: z.string(),
+    name: z.string().default(""),
+    url: z.string().default(""),
+    price_string: z.string().optional(),
+    image: z.string().optional(),
+    stars: z.number().optional(),
+    total_reviews: z.number().optional(),
+  })
+  .passthrough();
+
+const rawSearchResponseSchema = z
+  .object({
+    results: z.array(rawSearchItemSchema).default([]),
+  })
+  .passthrough();
+
+// -- Mappers --
+
+function mapProduct(asin: string, raw: z.infer<typeof rawProductSchema>): AmazonProduct {
+  return {
+    asin,
+    name: raw.name,
+    brand: raw.brand,
+    price_string: raw.pricing ?? raw.list_price ?? "N/A",
+    bullets: raw.feature_bullets,
+    images: raw.images,
+    ...(raw.average_rating != null ? { rating: raw.average_rating } : {}),
+    ...(raw.total_reviews != null ? { total_reviews: raw.total_reviews } : {}),
+    ...(raw.full_description ? { description: raw.full_description } : {}),
+    ...(raw.product_information ? { features: raw.product_information } : {}),
+    ...(raw.availability_status != null
+      ? { in_stock: raw.availability_status.toLowerCase().includes("in stock") }
+      : {}),
+  };
+}
+
+function mapReview(raw: z.infer<typeof rawReviewSchema>): AmazonReview {
+  return {
+    id: raw.id,
+    title: raw.title,
+    body: raw.body,
+    rating: raw.rating,
+    reviewer_name: raw.profile.name,
+    verified_purchase: raw.verified_purchase,
+    ...(raw.date?.date ? { date_iso: raw.date.date } : {}),
+    ...(raw.helpful_votes != null ? { helpful_votes: raw.helpful_votes } : {}),
+  };
+}
+
+function mapSearchResult(raw: z.infer<typeof rawSearchItemSchema>): AmazonSearchResult {
+  return {
+    asin: raw.asin,
+    title: raw.name,
+    url: raw.url,
+    ...(raw.price_string ? { price_string: raw.price_string } : {}),
+    ...(raw.image ? { image: raw.image } : {}),
+    ...(raw.stars != null ? { rating: raw.stars } : {}),
+    ...(raw.total_reviews != null ? { total_reviews: raw.total_reviews } : {}),
+  };
+}
+
+// -- Public API --
+
+/** Fetch a product's detail page by ASIN via ScraperAPI structured endpoint. */
+export async function getProduct(asin: string): Promise<AmazonProduct> {
+  if (!ASIN_RE.test(asin)) {
+    throw new ValidationError(`Invalid ASIN format: "${asin}". Must be 10 alphanumeric characters.`);
+  }
+
+  logger.debug({ asin }, "scraper.getProduct: start");
+
+  try {
+    const data: unknown = await limit(() =>
+      withRetry(async () => {
+        const res = await getClient().get("/product", { params: { asin } });
+        return res.data as unknown;
+      }),
+    );
+
+    const parsed = rawProductSchema.parse(data);
+    const product = mapProduct(asin, parsed);
+
+    logger.info({ asin, name: product.name, reviews: product.total_reviews }, "scraper.getProduct: success");
+    return product;
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
+    logger.error({ asin, err: error }, "scraper.getProduct: failed");
+    throw new UpstreamError(`ScraperAPI product fetch failed for ASIN ${asin}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Fetch customer reviews for an ASIN. Returns up to `max` reviews. */
+export async function getReviews(asin: string, max: number = 10): Promise<AmazonReview[]> {
+  if (!ASIN_RE.test(asin)) {
+    throw new ValidationError(`Invalid ASIN format: "${asin}". Must be 10 alphanumeric characters.`);
+  }
+
+  logger.debug({ asin, max }, "scraper.getReviews: start");
+
+  try {
+    const pagesNeeded = Math.ceil(max / 10);
+    const pages = Array.from({ length: pagesNeeded }, (_, i) => i + 1);
+
+    const results = await Promise.all(
+      pages.map((page) =>
+        limit(() =>
+          withRetry(async () => {
+            const res = await getClient().get("/review", { params: { asin, page } });
+            return res.data as unknown;
+          }),
+        ),
+      ),
+    );
+
+    const reviews: AmazonReview[] = [];
+    for (const data of results) {
+      const parsed = rawReviewsResponseSchema.parse(data);
+      reviews.push(...parsed.reviews.map(mapReview));
+    }
+
+    const sliced = reviews.slice(0, max);
+    logger.info({ asin, fetched: sliced.length, pagesQueried: pagesNeeded }, "scraper.getReviews: success");
+    return sliced;
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
+    logger.error({ asin, err: error }, "scraper.getReviews: failed");
+    throw new UpstreamError(`ScraperAPI review fetch failed for ASIN ${asin}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Search Amazon for products matching a query. Returns up to `limit` results. */
+export async function searchAmazon(query: string, resultLimit: number = 10): Promise<AmazonSearchResult[]> {
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    throw new ValidationError("Search query must be non-empty.");
+  }
+
+  logger.debug({ query: trimmed, resultLimit }, "scraper.searchAmazon: start");
+
+  try {
+    const data: unknown = await limit(() =>
+      withRetry(async () => {
+        const res = await getClient().get("/search", { params: { query: trimmed } });
+        return res.data as unknown;
+      }),
+    );
+
+    const parsed = rawSearchResponseSchema.parse(data);
+    const items = parsed.results
+      .filter((r) => r.type === "search_product" || !r.type)
+      .slice(0, resultLimit)
+      .map(mapSearchResult);
+
+    logger.info({ query: trimmed, count: items.length }, "scraper.searchAmazon: success");
+    return items;
+  } catch (error) {
+    if (error instanceof ValidationError) throw error;
+    logger.error({ query: trimmed, err: error }, "scraper.searchAmazon: failed");
+    throw new UpstreamError(`ScraperAPI search failed for query "${trimmed}": ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
