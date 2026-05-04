@@ -1,9 +1,18 @@
-import type { Severity, SynthesisReport } from "../types/sse";
+import { useEffect, useState } from "react";
+import {
+  AnimatePresence,
+  animate,
+  motion,
+  useReducedMotion,
+  type Variants,
+} from "motion/react";
+import type { Severity, SynthesisReport, SsePhase } from "../types/sse";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 interface Props {
+  phase: "idle" | SsePhase;
   report: SynthesisReport | null;
   streamingText: string;
 }
@@ -50,6 +59,27 @@ function ColumnHeading({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Count up from 0 → target over duration ms. Respects reduced motion (sets immediately). */
+function useCountUp(target: number, duration = 1200): number {
+  const reduced = useReducedMotion();
+  const [value, setValue] = useState(0);
+
+  useEffect(() => {
+    if (reduced) {
+      setValue(target);
+      return;
+    }
+    const controls = animate(0, target, {
+      duration: duration / 1000,
+      ease: "easeOut",
+      onUpdate: (v) => setValue(v),
+    });
+    return () => controls.stop();
+  }, [target, duration, reduced]);
+
+  return Math.round(value);
+}
+
 function StreamingView({ text }: { text: string }) {
   return (
     <div className="flex flex-col gap-4">
@@ -66,7 +96,28 @@ function StreamingView({ text }: { text: string }) {
   );
 }
 
+const SECTION_VARIANTS: Variants = {
+  hidden: { opacity: 0, y: 12 },
+  show: (i: number) => ({
+    opacity: 1,
+    y: 0,
+    transition: { delay: 0.15 + i * 0.08, duration: 0.4, ease: "easeOut" },
+  }),
+};
+
+const REDUCED_SECTION_VARIANTS: Variants = {
+  hidden: { opacity: 0 },
+  show: (_i: number) => ({ opacity: 1, transition: { duration: 0.2 } }),
+};
+
 function ReportView({ report }: { report: SynthesisReport }) {
+  const reduced = useReducedMotion();
+  const sectionVariants = reduced ? REDUCED_SECTION_VARIANTS : SECTION_VARIANTS;
+
+  const wouldNotBuy = useCountUp(report.would_not_buy_count, 1200);
+  const revLow = useCountUp(report.revenue_at_risk_estimate.monthly_usd_low, 1200);
+  const revHigh = useCountUp(report.revenue_at_risk_estimate.monthly_usd_high, 1200);
+
   return (
     <div className="flex flex-col gap-6">
       <header className="flex flex-col gap-2">
@@ -79,7 +130,14 @@ function ReportView({ report }: { report: SynthesisReport }) {
           SYNTHESIS REPORT
         </h2>
         <p className="font-mono text-sm text-muted">
-          {report.would_not_buy_count}/10 would not buy
+          <motion.span
+            initial={false}
+            animate={{ opacity: 1 }}
+            className="tabular-nums"
+          >
+            {wouldNotBuy}
+          </motion.span>
+          /10 would not buy
         </p>
         <p className="mt-2 font-display text-sm leading-relaxed text-text">
           {report.executive_summary}
@@ -87,7 +145,13 @@ function ReportView({ report }: { report: SynthesisReport }) {
       </header>
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-        <section className="flex flex-col gap-3">
+        <motion.section
+          custom={0}
+          variants={sectionVariants}
+          initial="hidden"
+          animate="show"
+          className="flex flex-col gap-3"
+        >
           <ColumnHeading>Top friction</ColumnHeading>
           <ul className="flex flex-col gap-3">
             {report.top_friction_points.map((f, i) => (
@@ -100,9 +164,15 @@ function ReportView({ report }: { report: SynthesisReport }) {
               </li>
             ))}
           </ul>
-        </section>
+        </motion.section>
 
-        <section className="flex flex-col gap-3">
+        <motion.section
+          custom={1}
+          variants={sectionVariants}
+          initial="hidden"
+          animate="show"
+          className="flex flex-col gap-3"
+        >
           <ColumnHeading>Conversion levers</ColumnHeading>
           <ul className="flex flex-col gap-3">
             {report.top_conversion_levers.map((l, i) => (
@@ -117,9 +187,15 @@ function ReportView({ report }: { report: SynthesisReport }) {
               </li>
             ))}
           </ul>
-        </section>
+        </motion.section>
 
-        <section className="flex flex-col gap-3">
+        <motion.section
+          custom={2}
+          variants={sectionVariants}
+          initial="hidden"
+          animate="show"
+          className="flex flex-col gap-3"
+        >
           <ColumnHeading>Winning competitor</ColumnHeading>
           {report.winning_competitor.name ? (
             <div className="flex flex-col gap-1">
@@ -138,16 +214,15 @@ function ReportView({ report }: { report: SynthesisReport }) {
           ) : (
             <p className="text-xs text-muted">No clear winning competitor cited.</p>
           )}
-        </section>
+        </motion.section>
       </div>
 
       <footer className="flex flex-col gap-1 border-t border-border pt-4">
         <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
           Estimated revenue at risk (monthly)
         </span>
-        <span className="font-display text-xl font-semibold text-accent">
-          ${report.revenue_at_risk_estimate.monthly_usd_low.toLocaleString()} – $
-          {report.revenue_at_risk_estimate.monthly_usd_high.toLocaleString()}/mo
+        <span className="font-display text-xl font-semibold text-accent tabular-nums">
+          ${revLow.toLocaleString()} – ${revHigh.toLocaleString()}/mo
         </span>
         <p className="text-xs leading-relaxed text-muted">
           {report.revenue_at_risk_estimate.reasoning}
@@ -157,18 +232,33 @@ function ReportView({ report }: { report: SynthesisReport }) {
   );
 }
 
-export function SynthesisPanel({ report, streamingText }: Props) {
+export function SynthesisPanel({ phase, report, streamingText }: Props) {
+  const reduced = useReducedMotion();
+  const visible = phase === "synthesis" || phase === "done";
+
   return (
-    <Card className="gap-0 border-border bg-surface p-6">
-      {report ? (
-        <ReportView report={report} />
-      ) : streamingText.length > 0 ? (
-        <StreamingView text={streamingText} />
-      ) : (
-        <div className="flex flex-col gap-2 text-center text-xs text-muted">
-          synthesis appears here once all 10 personas finish
-        </div>
+    <AnimatePresence>
+      {visible && (
+        <motion.section
+          key="synthesis"
+          initial={reduced ? { opacity: 0 } : { y: 60, opacity: 0 }}
+          animate={reduced ? { opacity: 1 } : { y: 0, opacity: 1 }}
+          exit={reduced ? { opacity: 0 } : { y: 30, opacity: 0 }}
+          transition={
+            reduced
+              ? { duration: 0.2 }
+              : { type: "spring", stiffness: 90, damping: 18 }
+          }
+        >
+          <Card className="gap-0 border-border bg-surface p-6">
+            {report ? (
+              <ReportView report={report} />
+            ) : (
+              <StreamingView text={streamingText} />
+            )}
+          </Card>
+        </motion.section>
       )}
-    </Card>
+    </AnimatePresence>
   );
 }

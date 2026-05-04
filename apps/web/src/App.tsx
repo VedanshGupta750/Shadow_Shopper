@@ -1,12 +1,11 @@
 import { useCallback } from "react";
 import { UrlBar } from "./components/UrlBar";
-import { PersonaCard } from "./components/PersonaCard";
+import { PersonaGrid } from "./components/PersonaGrid";
 import { SurfacingGrid } from "./components/SurfacingGrid";
 import { SynthesisPanel } from "./components/SynthesisPanel";
 import { AppHeader } from "./components/AppHeader";
 import { NoiseOverlay } from "./components/NoiseOverlay";
 import { usePersonaStream, type StreamState } from "./hooks/usePersonaStream";
-import { PERSONA_METADATA } from "./lib/personaMetadata";
 
 function statusLine(state: StreamState): string {
   if (state.phase === "idle") return "ready — paste an Amazon URL to start";
@@ -70,20 +69,11 @@ function App() {
           >
             10 BUYER PERSONAS
           </h2>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-            {PERSONA_METADATA.map((persona) => {
-              const personaState = state.personas[persona.id] ?? {
-                tokens: "",
-                status: "pending" as const,
-              };
-              return (
-                <PersonaCard key={persona.id} persona={persona} state={personaState} />
-              );
-            })}
-          </div>
+          <PersonaGrid personaStates={state.personas} />
         </section>
 
         <SynthesisPanel
+          phase={state.phase}
           report={state.synthesis.report}
           streamingText={state.synthesis.tokens}
         />

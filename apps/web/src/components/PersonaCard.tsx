@@ -1,4 +1,12 @@
+import { useEffect, useState } from "react";
 import { Check, X, ArrowRight } from "lucide-react";
+import {
+  AnimatePresence,
+  animate,
+  motion,
+  useReducedMotion,
+  type Variants,
+} from "motion/react";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -24,9 +32,9 @@ interface VerdictStyle {
   pillBg: string;
   pillText: string;
   pillBorder: string;
-  progressBar: string;
   icon: typeof Check;
   label: string;
+  cssVarColor: string;
 }
 
 const VERDICT_STYLE: Record<PersonaVerdict["verdict"], VerdictStyle> = {
@@ -34,25 +42,25 @@ const VERDICT_STYLE: Record<PersonaVerdict["verdict"], VerdictStyle> = {
     pillBg: "bg-accent/15",
     pillText: "text-accent",
     pillBorder: "border-accent/40",
-    progressBar: "bg-accent",
     icon: Check,
     label: "would buy",
+    cssVarColor: "var(--color-accent)",
   },
   "would-not-buy": {
     pillBg: "bg-danger/15",
     pillText: "text-danger",
     pillBorder: "border-danger/40",
-    progressBar: "bg-danger",
     icon: X,
     label: "would not buy",
+    cssVarColor: "var(--color-danger)",
   },
   "would-buy-competitor": {
     pillBg: "bg-warn/15",
     pillText: "text-warn",
     pillBorder: "border-warn/40",
-    progressBar: "bg-warn",
     icon: ArrowRight,
     label: "buy competitor",
+    cssVarColor: "var(--color-warn)",
   },
 };
 
@@ -74,7 +82,28 @@ function VerdictPill({ verdict }: { verdict: PersonaVerdict["verdict"] }) {
   );
 }
 
+const FRICTION_LIST_VARIANTS: Variants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0.06, delayChildren: 0.1 } },
+};
+
+const FRICTION_ITEM_VARIANTS: Variants = {
+  hidden: { opacity: 0, x: -4 },
+  show: { opacity: 1, x: 0, transition: { duration: 0.25, ease: "easeOut" } },
+};
+
+const REDUCED_FRICTION_LIST_VARIANTS: Variants = {
+  hidden: {},
+  show: { transition: { staggerChildren: 0 } },
+};
+
+const REDUCED_FRICTION_ITEM_VARIANTS: Variants = {
+  hidden: { opacity: 0 },
+  show: { opacity: 1, transition: { duration: 0.15 } },
+};
+
 export function PersonaCard({ persona, state }: Props) {
+  const reduced = useReducedMotion();
   const avatar = getAvatarUrl(persona.name, persona.age);
   const titleId = `persona-${persona.id}-title`;
   const verdict = state.verdict;
@@ -84,10 +113,76 @@ export function PersonaCard({ persona, state }: Props) {
   const isStreaming = state.status === "streaming";
   const isError = state.status === "error";
 
+  // Animated confidence (0 → confidence over 600ms)
+  const [animatedConf, setAnimatedConf] = useState(0);
+  useEffect(() => {
+    if (!verdict) {
+      setAnimatedConf(0);
+      return;
+    }
+    if (reduced) {
+      setAnimatedConf(confidence);
+      return;
+    }
+    const controls = animate(0, confidence, {
+      duration: 0.6,
+      ease: "easeOut",
+      onUpdate: (v) => setAnimatedConf(v),
+    });
+    return () => controls.stop();
+  }, [confidence, verdict, reduced]);
+
+  // Card variants: full vs reduced
+  const cardVariants: Variants = reduced
+    ? {
+        hidden: { opacity: 0 },
+        show: { opacity: 1, transition: { duration: 0.2 } },
+        streaming: { opacity: 1 },
+      }
+    : {
+        hidden: {
+          opacity: 0,
+          y: 8,
+          scale: 1,
+          boxShadow: "0 0 0px -20px transparent",
+        },
+        show: {
+          opacity: 1,
+          y: 0,
+          scale: 1,
+          boxShadow: "0 0 0px -20px transparent",
+          transition: { duration: 0.4, ease: "easeOut" },
+        },
+        streaming: {
+          opacity: [0.92, 1, 0.92],
+          y: 0,
+          scale: [1, 1.012, 1],
+          boxShadow: "0 0 60px -20px var(--color-accent)",
+          transition: {
+            duration: 3.2,
+            repeat: Infinity,
+            ease: "easeInOut",
+            boxShadow: { duration: 0.5, repeat: 0 },
+          },
+        },
+      };
+
+  const animateState = isStreaming ? "streaming" : "show";
+
+  const frictionListVariants = reduced
+    ? REDUCED_FRICTION_LIST_VARIANTS
+    : FRICTION_LIST_VARIANTS;
+  const frictionItemVariants = reduced
+    ? REDUCED_FRICTION_ITEM_VARIANTS
+    : FRICTION_ITEM_VARIANTS;
+
   return (
-    <article
+    <motion.article
       role="article"
       aria-labelledby={titleId}
+      variants={cardVariants}
+      animate={animateState}
+      {...(isStreaming ? { style: { willChange: "transform" as const } } : {})}
       className={cn(
         "flex min-h-[280px] flex-col rounded-xl border border-border bg-surface p-4",
       )}
@@ -148,41 +243,29 @@ export function PersonaCard({ persona, state }: Props) {
       </ScrollArea>
 
       <footer className="flex flex-col gap-2">
-        {verdict ? (
-          <>
-            <div className="flex items-center justify-between gap-2">
+        <AnimatePresence mode="wait">
+          {state.status === "done" && verdict ? (
+            <motion.div
+              key="done"
+              initial={reduced ? { opacity: 0 } : { scale: 0.6, rotate: -12, opacity: 0 }}
+              animate={reduced ? { opacity: 1 } : { scale: 1, rotate: 0, opacity: 1 }}
+              transition={
+                reduced
+                  ? { duration: 0.2 }
+                  : { type: "spring", stiffness: 500, damping: 22 }
+              }
+              className="flex items-center justify-between gap-2"
+            >
               <VerdictPill verdict={verdict.verdict} />
               <span className="font-mono text-[10px] text-muted">
                 {confidence}% confidence
               </span>
-            </div>
-            <Progress
-              value={confidence}
-              className="h-1 bg-surface-2"
-              aria-label={`${confidence}% confidence`}
-              {...(verdictStyle
-                ? {
-                    style: {
-                      // Tailwind class on indicator (set via descendant in shadcn) — override via inline.
-                    },
-                  }
-                : {})}
-            />
-            <style>{`article[aria-labelledby="${titleId}"] [data-slot="progress-indicator"] { background-color: var(--color-${verdictStyle === VERDICT_STYLE["would-buy"] ? "accent" : verdictStyle === VERDICT_STYLE["would-not-buy"] ? "danger" : "warn"}); }`}</style>
-            {frictionPreview.length > 0 && (
-              <ul className="mt-1 space-y-0.5">
-                {frictionPreview.map((f, i) => (
-                  <li key={i} className="text-xs text-muted leading-snug">
-                    <span aria-hidden className="mr-1">•</span>
-                    {f}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        ) : (
-          <>
-            <div className="flex items-center justify-between gap-2">
+            </motion.div>
+          ) : (
+            <div
+              key="pending"
+              className="flex items-center justify-between gap-2"
+            >
               <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
                 {state.status}
               </span>
@@ -190,14 +273,38 @@ export function PersonaCard({ persona, state }: Props) {
                 <span className="font-mono text-[10px] text-muted">streaming…</span>
               )}
             </div>
-            <Progress
-              value={isStreaming ? 30 : 0}
-              className="h-1 bg-surface-2"
-              aria-label="awaiting verdict"
-            />
-          </>
+          )}
+        </AnimatePresence>
+
+        <Progress
+          value={verdict ? animatedConf : isStreaming ? 30 : 0}
+          className="h-1 bg-surface-2"
+          aria-label={verdict ? `${confidence}% confidence` : "awaiting verdict"}
+        />
+        {verdictStyle && (
+          <style>{`article[aria-labelledby="${titleId}"] [data-slot="progress-indicator"] { background-color: ${verdictStyle.cssVarColor}; }`}</style>
+        )}
+
+        {verdict && frictionPreview.length > 0 && (
+          <motion.ul
+            variants={frictionListVariants}
+            initial="hidden"
+            animate="show"
+            className="mt-1 space-y-0.5"
+          >
+            {frictionPreview.map((f, i) => (
+              <motion.li
+                key={i}
+                variants={frictionItemVariants}
+                className="text-xs text-muted leading-snug"
+              >
+                <span aria-hidden className="mr-1">•</span>
+                {f}
+              </motion.li>
+            ))}
+          </motion.ul>
         )}
       </footer>
-    </article>
+    </motion.article>
   );
 }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Loader2, CheckCircle2, Circle, XCircle, AlertCircle } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Dialog,
   DialogContent,
@@ -99,7 +100,15 @@ function cellAriaLabel(question: string, surface: AiSurface, state: CellState): 
   return `${surface}: ${label} for "${question}"`;
 }
 
+/** Animation key changes when state shifts (queued → pending → resolved), driving the spring re-mount. */
+function cellKey(result: SurfaceResult | null, pending: boolean): string {
+  if (result) return `r:${result.score}${result.error ? ":err" : ""}`;
+  if (pending) return "pending";
+  return "queued";
+}
+
 export function SurfacingGrid({ state }: Props) {
+  const reduced = useReducedMotion();
   const [openCell, setOpenCell] = useState<SurfaceResult | null>(null);
   const questions = state.questions;
 
@@ -153,23 +162,47 @@ export function SurfacingGrid({ state }: Props) {
                   const pending = pendingLookup.has(key);
                   const cellState: CellState = { result, pending };
                   const interactive = !!result && !result.error;
+                  const innerKey = cellKey(result, pending);
                   return (
-                    <button
+                    <motion.button
                       key={s}
                       type="button"
                       disabled={!interactive}
                       onClick={() => result && setOpenCell(result)}
                       aria-label={cellAriaLabel(q, s, cellState)}
+                      {...(interactive && !reduced
+                        ? { whileHover: { scale: 1.03 } }
+                        : {})}
+                      transition={
+                        reduced
+                          ? { duration: 0.15 }
+                          : { type: "spring", stiffness: 400, damping: 24 }
+                      }
                       className={cn(
                         "flex h-[60px] items-center justify-center gap-2 rounded-md border transition-colors",
                         cellChromeClasses(cellState),
                         interactive
-                          ? "cursor-pointer hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                          ? "cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                           : "cursor-default",
                       )}
                     >
-                      <CellContent {...cellState} />
-                    </button>
+                      <AnimatePresence mode="wait" initial={false}>
+                        <motion.div
+                          key={innerKey}
+                          initial={reduced ? { opacity: 0 } : { scale: 0.95, opacity: 0 }}
+                          animate={reduced ? { opacity: 1 } : { scale: 1, opacity: 1 }}
+                          exit={reduced ? { opacity: 0 } : { scale: 0.95, opacity: 0 }}
+                          transition={
+                            reduced
+                              ? { duration: 0.15 }
+                              : { type: "spring", stiffness: 400, damping: 24 }
+                          }
+                          className="flex items-center gap-2"
+                        >
+                          <CellContent {...cellState} />
+                        </motion.div>
+                      </AnimatePresence>
+                    </motion.button>
                   );
                 })}
               </div>
