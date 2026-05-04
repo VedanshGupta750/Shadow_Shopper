@@ -40,11 +40,29 @@ export interface SynthesisReport {
   };
 }
 
-export type SsePhase = "scraping" | "personas" | "synthesis" | "done";
+export type AiSurface = "rufus" | "chatgpt";
+
+export type SurfacingScore = "green" | "yellow" | "red";
+
+export interface SurfaceResult {
+  question: string;
+  surface: AiSurface;
+  answer_text: string;
+  mentioned_target: boolean;
+  mentioned_position: number | null;
+  score: SurfacingScore;
+  error: string | null;
+}
+
+export type SsePhase = "scraping" | "surfacing" | "personas" | "synthesis" | "done";
 
 export type SseEvent =
   | { event: "phase"; data: { phase: SsePhase } }
   | { event: "scrape-progress"; data: { stage: string; message: string } }
+  | { event: "surfacing-questions"; data: { questions: string[] } }
+  | { event: "surfacing-cell-start"; data: { question: string; surface: AiSurface } }
+  | { event: "surfacing-cell-result"; data: SurfaceResult }
+  | { event: "surfacing-complete"; data: { results: SurfaceResult[] } }
   | { event: "persona-token"; data: { personaId: string; token: string } }
   | { event: "persona-complete"; data: { personaId: string; verdict: PersonaVerdict } }
   | { event: "persona-error"; data: { personaId: string; message: string } }

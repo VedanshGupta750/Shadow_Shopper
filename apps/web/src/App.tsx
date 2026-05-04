@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { UrlBar } from "./components/UrlBar";
 import { PersonaCard } from "./components/PersonaCard";
+import { SurfacingGrid } from "./components/SurfacingGrid";
 import { usePersonaStream } from "./hooks/usePersonaStream";
 import { PERSONA_METADATA } from "./lib/personaMetadata";
 import type { Severity, SynthesisReport } from "./types/sse";
@@ -109,6 +110,11 @@ function phaseLabel(state: ReturnType<typeof usePersonaStream>["state"]): string
       ? `scraping (${state.scrapeStage.stage}: ${state.scrapeStage.message})`
       : "scraping...";
   }
+  if (state.phase === "surfacing") {
+    const cells = state.surfacing.cells.length;
+    const total = state.surfacing.questions.length * 2;
+    return total > 0 ? `surfacing (${cells}/${total} cells)` : "surfacing (generating questions)";
+  }
   if (state.phase === "personas") {
     const states = Object.values(state.personas);
     const done = states.filter((p) => p.status === "done" || p.status === "error").length;
@@ -216,6 +222,8 @@ function App() {
           </span>
         )}
       </div>
+
+      <SurfacingGrid state={state.surfacing} />
 
       <div style={gridStyle}>
         {PERSONA_METADATA.map((persona) => {

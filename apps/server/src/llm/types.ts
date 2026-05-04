@@ -60,3 +60,27 @@ export interface SynthesisReport {
     reasoning: string;
   };
 }
+
+/** A free-form question a real shopper would ask an AI shopping assistant. */
+export type BuyerQuestion = string;
+
+/** AI shopping surface we simulate. Rufus is Amazon's; ChatGPT is OpenAI's shopping mode. */
+export type AiSurface = "rufus" | "chatgpt";
+
+export type SurfacingScore = "green" | "yellow" | "red";
+
+/**
+ * Result of one (question, surface) cell: did the listing surface in the simulated AI answer,
+ * and at what position. Score buckets the position (or non-mention) into a traffic-light value.
+ */
+export interface SurfaceResult {
+  question: BuyerQuestion;
+  surface: AiSurface;
+  answer_text: string;
+  mentioned_target: boolean;
+  /** 1-based position in the answer's product list. Null when not mentioned. */
+  mentioned_position: number | null;
+  score: SurfacingScore;
+  /** Set when the simulator call failed. UI renders gray instead of the score color. */
+  error: string | null;
+}

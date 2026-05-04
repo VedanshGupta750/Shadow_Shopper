@@ -30,12 +30,13 @@ const validReport: SynthesisReport = {
   revenue_at_risk_estimate: { monthly_usd_low: 1000, monthly_usd_high: 2000, reasoning: "stub" },
 };
 
-const { mockGetProduct, mockGetReviews, mockSearch, mockStreamPersona, mockStreamSynth } = vi.hoisted(() => ({
+const { mockGetProduct, mockGetReviews, mockSearch, mockStreamPersona, mockStreamSynth, mockStreamSurf } = vi.hoisted(() => ({
   mockGetProduct: vi.fn(),
   mockGetReviews: vi.fn(),
   mockSearch: vi.fn(),
   mockStreamPersona: vi.fn(),
   mockStreamSynth: vi.fn(),
+  mockStreamSurf: vi.fn(),
 }));
 
 vi.mock("../../scraper/index.js", async () => {
@@ -58,6 +59,10 @@ vi.mock("../../synthesizer/run.js", () => ({
   streamSynthesizer: mockStreamSynth,
 }));
 
+vi.mock("../../surfacing/run.js", () => ({
+  streamSurfacing: mockStreamSurf,
+}));
+
 import { createApp } from "../../app.js";
 
 const app = createApp();
@@ -77,6 +82,37 @@ async function* fakeSynthStream() {
     type: "done" as const,
     data: { report: validReport, usage: { input_tokens: 1500, output_tokens: 600 } },
   };
+}
+
+async function* fakeSurfacingStream() {
+  const questions = ["q1?", "q2?", "q3?", "q4?", "q5?"];
+  yield { type: "questions" as const, data: { questions } };
+  const results: Array<{
+    question: string;
+    surface: "rufus" | "chatgpt";
+    answer_text: string;
+    mentioned_target: boolean;
+    mentioned_position: number | null;
+    score: "green" | "yellow" | "red";
+    error: string | null;
+  }> = [];
+  for (const q of questions) {
+    for (const s of ["rufus", "chatgpt"] as const) {
+      yield { type: "cell-start" as const, data: { question: q, surface: s } };
+      const result = {
+        question: q,
+        surface: s,
+        answer_text: `mock answer for ${q} on ${s}`,
+        mentioned_target: true,
+        mentioned_position: 1,
+        score: "green" as const,
+        error: null,
+      };
+      results.push(result);
+      yield { type: "cell-result" as const, data: result };
+    }
+  }
+  yield { type: "done" as const, data: { results, totalCostUsd: 0 } };
 }
 
 function parseSseChunks(body: string): Array<{ event: string; data: unknown }> {
@@ -109,6 +145,7 @@ describe("streamPersonasHandler", () => {
     mockSearch.mockReset();
     mockStreamPersona.mockReset();
     mockStreamSynth.mockReset();
+    mockStreamSurf.mockReset();
 
     mockGetProduct.mockResolvedValue({
       asin: "B09V3KXJPB",
@@ -126,6 +163,7 @@ describe("streamPersonasHandler", () => {
     mockSearch.mockResolvedValue([]);
     mockStreamPersona.mockImplementation((persona: { id: string }) => fakePersonaStream(persona.id));
     mockStreamSynth.mockImplementation(() => fakeSynthStream());
+    mockStreamSurf.mockImplementation(() => fakeSurfacingStream());
   });
 
   it("returns 400 when productUrl is missing", async () => {
@@ -161,12 +199,16 @@ describe("streamPersonasHandler", () => {
 
     expect(eventNames).toContain("persona-token");
     expect(eventNames).toContain("persona-complete");
+    expect(eventNames).toContain("surfacing-questions");
+    expect(eventNames).toContain("surfacing-cell-start");
+    expect(eventNames).toContain("surfacing-cell-result");
+    expect(eventNames).toContain("surfacing-complete");
     expect(eventNames).toContain("synthesis-token");
     expect(eventNames).toContain("synthesis-complete");
     expect(eventNames).toContain("done");
 
     const phases = events.filter((e) => e.event === "phase").map((e) => (e.data as { phase: string }).phase);
-    expect(phases).toEqual(["scraping", "personas", "synthesis", "done"]);
+    expect(phases).toEqual(["scraping", "surfacing", "personas", "synthesis", "done"]);
 
     const personaCompletes = events.filter((e) => e.event === "persona-complete");
     expect(personaCompletes.length).toBe(10);

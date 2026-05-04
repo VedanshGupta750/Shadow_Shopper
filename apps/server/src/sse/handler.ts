@@ -5,10 +5,11 @@ import { buildBrief } from "../personas/brief.js";
 import { PERSONAS } from "../personas/index.js";
 import { streamPersona } from "../llm/callPersona.js";
 import { streamSynthesizer } from "../synthesizer/run.js";
+import { streamSurfacing } from "../surfacing/run.js";
 import { logger } from "../logger.js";
 import { ValidationError } from "../errors.js";
 import { SseWriter } from "./writer.js";
-import type { Persona, PersonaResult } from "../llm/types.js";
+import type { Persona, PersonaResult, SurfaceResult } from "../llm/types.js";
 import type { AmazonReview, AmazonSearchResult } from "../types/amazon.js";
 
 const StreamRequestZ = z.object({
@@ -125,14 +126,56 @@ export async function streamPersonasHandler(
       writer.send("scrape-progress", { stage: "competitors", message: "Competitors unavailable, continuing" });
     }
 
-    const brief = buildBrief(product, reviews, competitors);
-    logger.info({ requestId, asin, briefChars: brief.length }, "sse.handler: brief built");
+    if (controller.signal.aborted) {
+      writer.close();
+      res.end();
+      return;
+    }
+
+    // ----- SURFACING PHASE -----
+    writer.send("phase", { phase: "surfacing" });
+    const surfaceResults: SurfaceResult[] = [];
+    let surfacingQuestionCount = 0;
+
+    for await (const event of streamSurfacing(product, competitors, controller.signal)) {
+      if (writer.isClosed()) break;
+      if (event.type === "questions") {
+        surfacingQuestionCount = event.data.questions.length;
+        writer.send("surfacing-questions", { questions: event.data.questions });
+      } else if (event.type === "cell-start") {
+        writer.send("surfacing-cell-start", {
+          question: event.data.question,
+          surface: event.data.surface,
+        });
+      } else if (event.type === "cell-result") {
+        surfaceResults.push(event.data);
+        writer.send("surfacing-cell-result", event.data);
+      } else if (event.type === "done") {
+        writer.send("surfacing-complete", { results: event.data.results });
+      }
+    }
+
+    logger.info(
+      {
+        requestId,
+        asin,
+        surfacingQuestionCount,
+        surfacingCells: surfaceResults.length,
+        surfacingGreens: surfaceResults.filter((r) => r.score === "green").length,
+        surfacingReds: surfaceResults.filter((r) => r.score === "red").length,
+      },
+      "sse.handler: surfacing phase complete",
+    );
 
     if (controller.signal.aborted) {
       writer.close();
       res.end();
       return;
     }
+
+    // ----- PERSONAS PHASE -----
+    const brief = buildBrief(product, reviews, competitors);
+    logger.info({ requestId, asin, briefChars: brief.length }, "sse.handler: brief built");
 
     writer.send("phase", { phase: "personas" });
 
@@ -162,6 +205,7 @@ export async function streamPersonasHandler(
       return;
     }
 
+    // ----- SYNTHESIS PHASE -----
     writer.send("phase", { phase: "synthesis" });
 
     const synthTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };

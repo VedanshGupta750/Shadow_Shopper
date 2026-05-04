@@ -114,6 +114,18 @@ export const synthesisReportJsonSchema: JsonSchemaNode = {
   },
 };
 
+export const buyerQuestionsJsonSchema: JsonSchemaNode = {
+  type: "object",
+  additionalProperties: false,
+  required: ["questions"],
+  properties: {
+    questions: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+};
+
 /**
  * Walk a JSON schema tree and assert it meets Azure OpenAI strict-mode rules:
  * - Every object has `additionalProperties: false`
@@ -158,6 +170,7 @@ export function strictifySchema(schema: JsonSchemaNode): void {
 // Validate at module load — fail fast if schema drifts
 strictifySchema(personaVerdictJsonSchema);
 strictifySchema(synthesisReportJsonSchema);
+strictifySchema(buyerQuestionsJsonSchema);
 
 // -- Zod schemas for runtime validation of LLM output --
 
@@ -201,4 +214,8 @@ export const SynthesisReportZ = z.object({
     monthly_usd_high: z.number().min(0),
     reasoning: z.string().min(1),
   }),
+});
+
+export const BuyerQuestionsZ = z.object({
+  questions: z.array(z.string().min(1)),
 });

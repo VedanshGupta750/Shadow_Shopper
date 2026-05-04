@@ -1,7 +1,14 @@
 import { useCallback, useReducer, useRef } from "react";
 import { API_BASE_URL } from "../lib/api";
 import { PERSONA_METADATA } from "../lib/personaMetadata";
-import type { PersonaVerdict, SseEvent, SsePhase, SynthesisReport } from "../types/sse";
+import type {
+  AiSurface,
+  PersonaVerdict,
+  SseEvent,
+  SsePhase,
+  SurfaceResult,
+  SynthesisReport,
+} from "../types/sse";
 
 export type PersonaStatus = "pending" | "streaming" | "done" | "error";
 
@@ -12,9 +19,20 @@ export interface PersonaState {
   error?: string | undefined;
 }
 
+export type SurfacingStatus = "pending" | "running" | "done";
+
+export interface SurfacingState {
+  questions: string[];
+  cells: SurfaceResult[];
+  /** Cells currently in flight (started, no result yet). */
+  pendingCells: { question: string; surface: AiSurface }[];
+  status: SurfacingStatus;
+}
+
 export interface StreamState {
   phase: "idle" | SsePhase;
   scrapeStage: { stage: string; message: string } | null;
+  surfacing: SurfacingState;
   personas: Record<string, PersonaState>;
   synthesis: { tokens: string; report: SynthesisReport | null };
   totalMs: number;
@@ -30,6 +48,10 @@ type Action =
   | { type: "LOCAL_ERROR"; message: string }
   | { type: "PHASE"; phase: SsePhase }
   | { type: "SCRAPE_PROGRESS"; stage: string; message: string }
+  | { type: "SURFACING_QUESTIONS"; questions: string[] }
+  | { type: "SURFACING_CELL_START"; question: string; surface: AiSurface }
+  | { type: "SURFACING_CELL_RESULT"; result: SurfaceResult }
+  | { type: "SURFACING_COMPLETE"; results: SurfaceResult[] }
   | { type: "PERSONA_TOKEN"; personaId: string; token: string }
   | { type: "PERSONA_COMPLETE"; personaId: string; verdict: PersonaVerdict }
   | { type: "PERSONA_ERROR"; personaId: string; message: string }
@@ -46,9 +68,14 @@ function freshPersonas(): Record<string, PersonaState> {
   return out;
 }
 
+function freshSurfacing(): SurfacingState {
+  return { questions: [], cells: [], pendingCells: [], status: "pending" };
+}
+
 const initialState: StreamState = {
   phase: "idle",
   scrapeStage: null,
+  surfacing: freshSurfacing(),
   personas: freshPersonas(),
   synthesis: { tokens: "", report: null },
   totalMs: 0,
@@ -75,10 +102,19 @@ function updatePersona(
 function reducer(state: StreamState, action: Action): StreamState {
   switch (action.type) {
     case "RESET":
-      return { ...initialState, personas: freshPersonas() };
+      return {
+        ...initialState,
+        personas: freshPersonas(),
+        surfacing: freshSurfacing(),
+      };
 
     case "START":
-      return { ...initialState, personas: freshPersonas(), isStreaming: true };
+      return {
+        ...initialState,
+        personas: freshPersonas(),
+        surfacing: freshSurfacing(),
+        isStreaming: true,
+      };
 
     case "CANCEL": {
       const personas = { ...state.personas };
@@ -88,17 +124,79 @@ function reducer(state: StreamState, action: Action): StreamState {
           personas[id] = { ...p, status: "error", error: "cancelled" };
         }
       }
-      return { ...state, personas, isStreaming: false };
+      return {
+        ...state,
+        personas,
+        surfacing: { ...state.surfacing, pendingCells: [] },
+        isStreaming: false,
+      };
     }
 
     case "LOCAL_ERROR":
       return { ...state, error: action.message, isStreaming: false };
 
     case "PHASE":
-      return { ...state, phase: action.phase };
+      return {
+        ...state,
+        phase: action.phase,
+        surfacing: {
+          ...state.surfacing,
+          status:
+            action.phase === "surfacing"
+              ? "running"
+              : state.surfacing.status === "running"
+                ? "done"
+                : state.surfacing.status,
+        },
+      };
 
     case "SCRAPE_PROGRESS":
       return { ...state, scrapeStage: { stage: action.stage, message: action.message } };
+
+    case "SURFACING_QUESTIONS":
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          questions: action.questions,
+          status: "running",
+        },
+      };
+
+    case "SURFACING_CELL_START":
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          pendingCells: [
+            ...state.surfacing.pendingCells,
+            { question: action.question, surface: action.surface },
+          ],
+        },
+      };
+
+    case "SURFACING_CELL_RESULT":
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          cells: [...state.surfacing.cells, action.result],
+          pendingCells: state.surfacing.pendingCells.filter(
+            (p) => !(p.question === action.result.question && p.surface === action.result.surface),
+          ),
+        },
+      };
+
+    case "SURFACING_COMPLETE":
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          cells: action.results,
+          pendingCells: [],
+          status: "done",
+        },
+      };
 
     case "PERSONA_TOKEN": {
       const current = state.personas[action.personaId] ?? { tokens: "", status: "pending" as PersonaStatus };
@@ -156,6 +254,18 @@ function sseEventToAction(evt: SseEvent): Action | null {
       return { type: "PHASE", phase: evt.data.phase };
     case "scrape-progress":
       return { type: "SCRAPE_PROGRESS", stage: evt.data.stage, message: evt.data.message };
+    case "surfacing-questions":
+      return { type: "SURFACING_QUESTIONS", questions: evt.data.questions };
+    case "surfacing-cell-start":
+      return {
+        type: "SURFACING_CELL_START",
+        question: evt.data.question,
+        surface: evt.data.surface,
+      };
+    case "surfacing-cell-result":
+      return { type: "SURFACING_CELL_RESULT", result: evt.data };
+    case "surfacing-complete":
+      return { type: "SURFACING_COMPLETE", results: evt.data.results };
     case "persona-token":
       return { type: "PERSONA_TOKEN", personaId: evt.data.personaId, token: evt.data.token };
     case "persona-complete":
