@@ -2,8 +2,11 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
+import rateLimit from "express-rate-limit";
 import { requestId } from "./middleware/requestId.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { asyncHandler } from "./middleware/asyncHandler.js";
+import { streamPersonasHandler } from "./sse/handler.js";
 import { logger } from "./logger.js";
 
 export function createApp() {
@@ -46,6 +49,16 @@ export function createApp() {
       res.status(503).json({ status: "not ready", envLoaded: false });
     }
   });
+
+  const streamLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: { code: "RATE_LIMITED", message: "Too many requests, slow down" } },
+  });
+
+  app.post("/api/stream-personas", streamLimiter, asyncHandler(streamPersonasHandler));
 
   app.use(errorHandler);
 
