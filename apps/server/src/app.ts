@@ -16,9 +16,13 @@ export function createApp() {
   app.use(helmet());
 
   const isProduction = process.env["NODE_ENV"] === "production";
+  const devOrigin = "http://localhost:5173";
+  const allowedOrigins = isProduction
+    ? [process.env["FRONTEND_ORIGIN"]].filter((o): o is string => Boolean(o))
+    : [devOrigin];
   app.use(
     cors({
-      origin: isProduction ? process.env["FRONTEND_ORIGIN"] : true,
+      origin: allowedOrigins,
       credentials: true,
     }),
   );
