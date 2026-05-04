@@ -4,31 +4,43 @@ import { extractAsin, getProductCached, getReviewsCached, searchAmazonCached } f
 import { buildBrief } from "../personas/brief.js";
 import { PERSONAS } from "../personas/index.js";
 import { streamPersona } from "../llm/callPersona.js";
+import { streamSynthesizer } from "../synthesizer/run.js";
 import { logger } from "../logger.js";
 import { ValidationError } from "../errors.js";
 import { SseWriter } from "./writer.js";
-import type { Persona } from "../llm/types.js";
+import type { Persona, PersonaResult } from "../llm/types.js";
 import type { AmazonReview, AmazonSearchResult } from "../types/amazon.js";
 
 const StreamRequestZ = z.object({
   productUrl: z.string().url(),
 });
 
+interface PersonaTotals {
+  inputTokens: number;
+  outputTokens: number;
+}
+
 async function runOnePersona(
   persona: Persona,
   brief: string,
   signal: AbortSignal,
   writer: SseWriter,
-  totals: { inputTokens: number; outputTokens: number },
-): Promise<void> {
+  totals: PersonaTotals,
+): Promise<PersonaResult | null> {
+  let result: PersonaResult | null = null;
   try {
     for await (const event of streamPersona(persona, brief, signal)) {
-      if (writer.isClosed()) return;
+      if (writer.isClosed()) return result;
       if (event.type === "token") {
         writer.send("persona-token", { personaId: persona.id, token: event.data.text });
       } else if (event.type === "done") {
         totals.inputTokens += event.data.usage.input_tokens;
         totals.outputTokens += event.data.usage.output_tokens;
+        result = {
+          personaId: persona.id,
+          verdict: event.data.verdict,
+          usage: event.data.usage,
+        };
         writer.send("persona-complete", {
           personaId: persona.id,
           verdict: event.data.verdict,
@@ -47,6 +59,7 @@ async function runOnePersona(
       writer.send("persona-error", { personaId: persona.id, message });
     }
   }
+  return result;
 }
 
 export async function streamPersonasHandler(
@@ -123,9 +136,24 @@ export async function streamPersonasHandler(
 
     writer.send("phase", { phase: "personas" });
 
-    const totals = { inputTokens: 0, outputTokens: 0 };
-    await Promise.allSettled(
-      PERSONAS.map((p) => runOnePersona(p, brief, controller.signal, writer, totals)),
+    const personaTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };
+    const settled = await Promise.allSettled(
+      PERSONAS.map((p) => runOnePersona(p, brief, controller.signal, writer, personaTotals)),
+    );
+
+    const successfulResults: PersonaResult[] = settled
+      .filter((s): s is PromiseFulfilledResult<PersonaResult | null> => s.status === "fulfilled")
+      .map((s) => s.value)
+      .filter((v): v is PersonaResult => v !== null);
+
+    logger.info(
+      {
+        requestId,
+        asin,
+        successCount: successfulResults.length,
+        personaTotals,
+      },
+      "sse.handler: persona phase complete",
     );
 
     if (controller.signal.aborted) {
@@ -135,24 +163,69 @@ export async function streamPersonasHandler(
     }
 
     writer.send("phase", { phase: "synthesis" });
-    writer.send("synthesis-token", { token: "[synthesis comes in phase 7]" });
-    writer.send("synthesis-complete", {
-      report: {
-        summary: "Synthesis stub - implemented in Phase 7",
-        top_friction_points: [],
-        buy_signals: [],
-        recommended_actions: [],
-      },
-    });
+
+    const synthTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };
+
+    if (successfulResults.length === 0) {
+      logger.warn({ requestId, asin }, "sse.handler: no successful verdicts, skipping synthesis");
+      writer.send("synthesis-token", {
+        token: "Synthesis skipped: no persona verdicts succeeded.",
+      });
+      writer.send("error", {
+        message: "No persona verdicts to synthesize",
+        code: "NO_VERDICTS",
+      });
+    } else {
+      let synthesisCompleted = false;
+      for await (const event of streamSynthesizer(
+        successfulResults,
+        product,
+        competitors,
+        controller.signal,
+      )) {
+        if (writer.isClosed()) break;
+        if (event.type === "token") {
+          writer.send("synthesis-token", { token: event.data.text });
+        } else if (event.type === "done") {
+          synthTotals.inputTokens = event.data.usage.input_tokens;
+          synthTotals.outputTokens = event.data.usage.output_tokens;
+          writer.send("synthesis-complete", { report: event.data.report });
+          synthesisCompleted = true;
+        } else {
+          writer.send("error", {
+            message: event.data.message,
+            code: "SYNTHESIS_FAILED",
+          });
+        }
+      }
+
+      logger.info(
+        { requestId, asin, synthTotals, synthesisCompleted },
+        "sse.handler: synthesizer cost",
+      );
+    }
+
+    if (controller.signal.aborted) {
+      writer.close();
+      res.end();
+      return;
+    }
 
     const totalMs = Date.now() - startedAt;
-    const totalCostUsd = 0;
+    const totalCostUsd = 0; // Azure internship endpoint - logged for tracking only
 
     writer.send("phase", { phase: "done" });
     writer.send("done", { totalMs, totalCostUsd });
 
     logger.info(
-      { requestId, asin, totalMs, totalCostUsd, totals },
+      {
+        requestId,
+        asin,
+        totalMs,
+        totalCostUsd,
+        personaTotals,
+        synthTotals,
+      },
       "sse.handler: stream complete",
     );
 

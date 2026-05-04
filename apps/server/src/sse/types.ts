@@ -1,12 +1,6 @@
-import type { PersonaVerdict } from "../llm/types.js";
+import type { PersonaVerdict, SynthesisReport } from "../llm/types.js";
 
-/** Stub for Phase 7. Will be populated when synthesis is implemented. */
-export interface SynthesisReport {
-  summary: string;
-  top_friction_points: string[];
-  buy_signals: string[];
-  recommended_actions: string[];
-}
+export type { SynthesisReport } from "../llm/types.js";
 
 export type SsePhase = "scraping" | "personas" | "synthesis" | "done";
 

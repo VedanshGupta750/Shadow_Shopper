@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import request from "supertest";
-import type { PersonaVerdict } from "../../llm/types.js";
+import type { PersonaVerdict, SynthesisReport } from "../../llm/types.js";
 
 const validVerdict: PersonaVerdict = {
   verdict: "would-not-buy",
@@ -13,11 +13,29 @@ const validVerdict: PersonaVerdict = {
   headline_quote: "Not buying.",
 };
 
-const { mockGetProduct, mockGetReviews, mockSearch, mockStreamPersona } = vi.hoisted(() => ({
+const validReport: SynthesisReport = {
+  would_not_buy_count: 10,
+  executive_summary: "Stub summary 1. Stub summary 2.",
+  top_friction_points: [
+    { headline: "F1", severity: "high", evidence: "ev1" },
+    { headline: "F2", severity: "med", evidence: "ev2" },
+    { headline: "F3", severity: "low", evidence: "ev3" },
+  ],
+  top_conversion_levers: [
+    { recommendation: "L1", expected_impact: "high", reasoning: "r1" },
+    { recommendation: "L2", expected_impact: "med", reasoning: "r2" },
+    { recommendation: "L3", expected_impact: "low", reasoning: "r3" },
+  ],
+  winning_competitor: { name: null, why: "n/a", votes: 0 },
+  revenue_at_risk_estimate: { monthly_usd_low: 1000, monthly_usd_high: 2000, reasoning: "stub" },
+};
+
+const { mockGetProduct, mockGetReviews, mockSearch, mockStreamPersona, mockStreamSynth } = vi.hoisted(() => ({
   mockGetProduct: vi.fn(),
   mockGetReviews: vi.fn(),
   mockSearch: vi.fn(),
   mockStreamPersona: vi.fn(),
+  mockStreamSynth: vi.fn(),
 }));
 
 vi.mock("../../scraper/index.js", async () => {
@@ -36,16 +54,28 @@ vi.mock("../../llm/callPersona.js", () => ({
   streamPersona: mockStreamPersona,
 }));
 
+vi.mock("../../synthesizer/run.js", () => ({
+  streamSynthesizer: mockStreamSynth,
+}));
+
 import { createApp } from "../../app.js";
 
 const app = createApp();
 
-async function* fakeStream(personaId: string) {
+async function* fakePersonaStream(personaId: string) {
   yield { type: "token" as const, data: { text: `[${personaId}] hello` } };
-  yield { type: "token" as const, data: { text: " world" } };
   yield {
     type: "done" as const,
     data: { verdict: validVerdict, usage: { input_tokens: 100, output_tokens: 50 } },
+  };
+}
+
+async function* fakeSynthStream() {
+  yield { type: "token" as const, data: { text: "synth tok 1 " } };
+  yield { type: "token" as const, data: { text: "synth tok 2" } };
+  yield {
+    type: "done" as const,
+    data: { report: validReport, usage: { input_tokens: 1500, output_tokens: 600 } },
   };
 }
 
@@ -78,6 +108,7 @@ describe("streamPersonasHandler", () => {
     mockGetReviews.mockReset();
     mockSearch.mockReset();
     mockStreamPersona.mockReset();
+    mockStreamSynth.mockReset();
 
     mockGetProduct.mockResolvedValue({
       asin: "B09V3KXJPB",
@@ -93,7 +124,8 @@ describe("streamPersonasHandler", () => {
     });
     mockGetReviews.mockResolvedValue([]);
     mockSearch.mockResolvedValue([]);
-    mockStreamPersona.mockImplementation((persona: { id: string }) => fakeStream(persona.id));
+    mockStreamPersona.mockImplementation((persona: { id: string }) => fakePersonaStream(persona.id));
+    mockStreamSynth.mockImplementation(() => fakeSynthStream());
   });
 
   it("returns 400 when productUrl is missing", async () => {
@@ -108,7 +140,7 @@ describe("streamPersonasHandler", () => {
     expect(res.status).toBe(400);
   });
 
-  it("emits expected event sequence for valid request", async () => {
+  it("emits expected event sequence including synthesis", async () => {
     const res = await request(app)
       .post("/api/stream-personas")
       .send({ productUrl: "https://www.amazon.com/dp/B09V3KXJPB" })
@@ -127,10 +159,9 @@ describe("streamPersonasHandler", () => {
     const events = parseSseChunks(res.body as string);
     const eventNames = events.map((e) => e.event);
 
-    expect(eventNames).toContain("phase");
-    expect(eventNames).toContain("scrape-progress");
     expect(eventNames).toContain("persona-token");
     expect(eventNames).toContain("persona-complete");
+    expect(eventNames).toContain("synthesis-token");
     expect(eventNames).toContain("synthesis-complete");
     expect(eventNames).toContain("done");
 
@@ -139,9 +170,33 @@ describe("streamPersonasHandler", () => {
 
     const personaCompletes = events.filter((e) => e.event === "persona-complete");
     expect(personaCompletes.length).toBe(10);
+
+    const synthCompletes = events.filter((e) => e.event === "synthesis-complete");
+    expect(synthCompletes.length).toBe(1);
+    const synthData = synthCompletes[0]?.data as { report: SynthesisReport };
+    expect(synthData.report.would_not_buy_count).toBe(10);
+    expect(synthData.report.top_friction_points.length).toBe(3);
   });
 
-  it("emits persona-error events when streamPersona yields error", async () => {
+  it("calls streamSynthesizer once with all 10 successful results", async () => {
+    await request(app)
+      .post("/api/stream-personas")
+      .send({ productUrl: "https://www.amazon.com/dp/B09V3KXJPB" })
+      .buffer(true)
+      .parse((response, callback) => {
+        let body = "";
+        response.on("data", (chunk: Buffer) => {
+          body += chunk.toString("utf-8");
+        });
+        response.on("end", () => callback(null, body));
+      });
+
+    expect(mockStreamSynth).toHaveBeenCalledTimes(1);
+    const [results] = mockStreamSynth.mock.calls[0] as [unknown[], ...unknown[]];
+    expect(results.length).toBe(10);
+  });
+
+  it("skips synthesis and emits error when all personas fail", async () => {
     mockStreamPersona.mockImplementation(async function* (persona: { id: string }) {
       yield { type: "error", data: { message: `forced fail for ${persona.id}` } };
     });
@@ -159,7 +214,14 @@ describe("streamPersonasHandler", () => {
       });
 
     const events = parseSseChunks(res.body as string);
-    const errors = events.filter((e) => e.event === "persona-error");
-    expect(errors.length).toBe(10);
+    const personaErrors = events.filter((e) => e.event === "persona-error");
+    expect(personaErrors.length).toBe(10);
+
+    const synthCompletes = events.filter((e) => e.event === "synthesis-complete");
+    expect(synthCompletes.length).toBe(0);
+
+    const errors = events.filter((e) => e.event === "error");
+    expect(errors.some((e) => (e.data as { code: string }).code === "NO_VERDICTS")).toBe(true);
+    expect(mockStreamSynth).not.toHaveBeenCalled();
   });
 });

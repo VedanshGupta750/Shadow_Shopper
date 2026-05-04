@@ -13,11 +13,31 @@ export interface PersonaVerdict {
   headline_quote: string;
 }
 
+export type Severity = "high" | "med" | "low";
+
 export interface SynthesisReport {
-  summary: string;
-  top_friction_points: string[];
-  buy_signals: string[];
-  recommended_actions: string[];
+  would_not_buy_count: number;
+  executive_summary: string;
+  top_friction_points: {
+    headline: string;
+    severity: Severity;
+    evidence: string;
+  }[];
+  top_conversion_levers: {
+    recommendation: string;
+    expected_impact: Severity;
+    reasoning: string;
+  }[];
+  winning_competitor: {
+    name: string | null;
+    why: string;
+    votes: number;
+  };
+  revenue_at_risk_estimate: {
+    monthly_usd_low: number;
+    monthly_usd_high: number;
+    reasoning: string;
+  };
 }
 
 export type SsePhase = "scraping" | "personas" | "synthesis" | "done";

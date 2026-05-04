@@ -49,6 +49,71 @@ export const personaVerdictJsonSchema: JsonSchemaNode = {
   },
 };
 
+const SEVERITY_ENUM = ["high", "med", "low"] as const;
+
+export const synthesisReportJsonSchema: JsonSchemaNode = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "would_not_buy_count",
+    "executive_summary",
+    "top_friction_points",
+    "top_conversion_levers",
+    "winning_competitor",
+    "revenue_at_risk_estimate",
+  ],
+  properties: {
+    would_not_buy_count: { type: "number" },
+    executive_summary: { type: "string" },
+    top_friction_points: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["headline", "severity", "evidence"],
+        properties: {
+          headline: { type: "string" },
+          severity: { type: "string", enum: SEVERITY_ENUM },
+          evidence: { type: "string" },
+        },
+      },
+    },
+    top_conversion_levers: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["recommendation", "expected_impact", "reasoning"],
+        properties: {
+          recommendation: { type: "string" },
+          expected_impact: { type: "string", enum: SEVERITY_ENUM },
+          reasoning: { type: "string" },
+        },
+      },
+    },
+    winning_competitor: {
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "why", "votes"],
+      properties: {
+        name: { type: ["string", "null"] },
+        why: { type: "string" },
+        votes: { type: "number" },
+      },
+    },
+    revenue_at_risk_estimate: {
+      type: "object",
+      additionalProperties: false,
+      required: ["monthly_usd_low", "monthly_usd_high", "reasoning"],
+      properties: {
+        monthly_usd_low: { type: "number" },
+        monthly_usd_high: { type: "number" },
+        reasoning: { type: "string" },
+      },
+    },
+  },
+};
+
 /**
  * Walk a JSON schema tree and assert it meets Azure OpenAI strict-mode rules:
  * - Every object has `additionalProperties: false`
@@ -92,8 +157,9 @@ export function strictifySchema(schema: JsonSchemaNode): void {
 
 // Validate at module load — fail fast if schema drifts
 strictifySchema(personaVerdictJsonSchema);
+strictifySchema(synthesisReportJsonSchema);
 
-// -- Zod schema for runtime validation of LLM output --
+// -- Zod schemas for runtime validation of LLM output --
 
 export const PersonaVerdictZ = z.object({
   verdict: z.enum(["would-buy", "would-not-buy", "would-buy-competitor"]),
@@ -104,4 +170,35 @@ export const PersonaVerdictZ = z.object({
   trust_signals_missing: z.array(z.string()),
   competitor_i_would_choose: z.string().nullable(),
   headline_quote: z.string(),
+});
+
+const SeverityZ = z.enum(["high", "med", "low"]);
+
+export const SynthesisReportZ = z.object({
+  would_not_buy_count: z.number().int().min(0).max(10),
+  executive_summary: z.string().min(1),
+  top_friction_points: z.array(
+    z.object({
+      headline: z.string().min(1),
+      severity: SeverityZ,
+      evidence: z.string().min(1),
+    }),
+  ),
+  top_conversion_levers: z.array(
+    z.object({
+      recommendation: z.string().min(1),
+      expected_impact: SeverityZ,
+      reasoning: z.string().min(1),
+    }),
+  ),
+  winning_competitor: z.object({
+    name: z.string().nullable(),
+    why: z.string(),
+    votes: z.number().int().min(0).max(10),
+  }),
+  revenue_at_risk_estimate: z.object({
+    monthly_usd_low: z.number().min(0),
+    monthly_usd_high: z.number().min(0),
+    reasoning: z.string().min(1),
+  }),
 });
