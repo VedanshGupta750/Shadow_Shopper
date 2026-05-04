@@ -122,7 +122,7 @@ export async function simulateRufus(
         { role: "user", content: buildUserMessage(question, candidates) },
       ],
     },
-    { timeout: 25_000, maxRetries: 1, signal },
+    { timeout: 60_000, maxRetries: 1, signal },
   );
 
   const content = response.choices[0]?.message?.content ?? "";

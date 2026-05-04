@@ -7,6 +7,7 @@ import { requestId } from "./middleware/requestId.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { asyncHandler } from "./middleware/asyncHandler.js";
 import { streamPersonasHandler } from "./sse/handler.js";
+import { getMetricsSnapshot } from "./metrics.js";
 import { logger } from "./logger.js";
 
 export function createApp() {
@@ -63,6 +64,26 @@ export function createApp() {
   });
 
   app.post("/api/stream-personas", streamLimiter, asyncHandler(streamPersonasHandler));
+
+  // Admin-only metrics endpoint, gated by ADMIN_SECRET shared header.
+  // When ADMIN_SECRET is unset, /metrics returns 503 to avoid accidental exposure.
+  app.get("/metrics", (req, res) => {
+    const secret = process.env["ADMIN_SECRET"];
+    if (!secret) {
+      res
+        .status(503)
+        .json({ error: { code: "METRICS_DISABLED", message: "ADMIN_SECRET not configured" } });
+      return;
+    }
+    const provided = req.header("x-admin-secret");
+    if (provided !== secret) {
+      res
+        .status(401)
+        .json({ error: { code: "UNAUTHORIZED", message: "Invalid or missing X-Admin-Secret header" } });
+      return;
+    }
+    res.json(getMetricsSnapshot());
+  });
 
   app.use(errorHandler);
 

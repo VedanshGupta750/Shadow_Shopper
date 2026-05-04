@@ -1,4 +1,11 @@
-import { useState, type ChangeEventHandler, type FormEventHandler } from "react";
+import {
+  forwardRef,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type ChangeEventHandler,
+  type FormEventHandler,
+} from "react";
 import { Play, Square } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
@@ -15,15 +22,25 @@ interface Props {
   errorLine?: string | null;
 }
 
-export function UrlBar({
-  onRun,
-  onCancel,
-  isStreaming = false,
-  statusLine,
-  errorLine = null,
-}: Props) {
+export interface UrlBarHandle {
+  focus: () => void;
+}
+
+export const UrlBar = forwardRef<UrlBarHandle, Props>(function UrlBar(
+  { onRun, onCancel, isStreaming = false, statusLine, errorLine = null },
+  ref,
+) {
   const reduced = useReducedMotion();
   const [url, setUrl] = useState(DEFAULT_URL);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focus: () => inputRef.current?.focus(),
+    }),
+    [],
+  );
 
   const handleChange: ChangeEventHandler<HTMLInputElement> = (e) => {
     setUrl(e.target.value);
@@ -47,6 +64,7 @@ export function UrlBar({
         className="flex items-center gap-2 rounded-xl border border-border bg-surface p-2"
       >
         <Input
+          ref={inputRef}
           type="url"
           value={url}
           onChange={handleChange}
@@ -102,4 +120,4 @@ export function UrlBar({
       </div>
     </div>
   );
-}
+});

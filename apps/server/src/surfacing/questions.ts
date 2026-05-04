@@ -6,7 +6,7 @@ import { AppError } from "../errors.js";
 import type { AmazonProduct, AmazonSearchResult } from "../types/amazon.js";
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 60_000;
 
 const QUESTIONS_SYSTEM = `You generate buyer questions for AI shopping research. Given a product, output 5 questions a real shopper would ask Rufus or ChatGPT before deciding to buy. The mix MUST be:
 - 2 product-comparison questions (e.g., "How does X compare to Y for Z use case?")

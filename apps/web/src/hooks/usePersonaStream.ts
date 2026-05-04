@@ -1,4 +1,5 @@
 import { useCallback, useReducer, useRef } from "react";
+import { toast } from "sonner";
 import { API_BASE_URL } from "../lib/api";
 import { PERSONA_METADATA } from "../lib/personaMetadata";
 import type {
@@ -29,12 +30,19 @@ export interface SurfacingState {
   status: SurfacingStatus;
 }
 
+export interface SynthesisStateSlice {
+  tokens: string;
+  report: SynthesisReport | null;
+  /** Set when synthesis fails non-fatally — UI shows inline fallback below personas. */
+  error: string | null;
+}
+
 export interface StreamState {
   phase: "idle" | SsePhase;
   scrapeStage: { stage: string; message: string } | null;
   surfacing: SurfacingState;
   personas: Record<string, PersonaState>;
-  synthesis: { tokens: string; report: SynthesisReport | null };
+  synthesis: SynthesisStateSlice;
   totalMs: number;
   totalCostUsd: number;
   error: string | null;
@@ -57,6 +65,7 @@ type Action =
   | { type: "PERSONA_ERROR"; personaId: string; message: string }
   | { type: "SYNTHESIS_TOKEN"; token: string }
   | { type: "SYNTHESIS_COMPLETE"; report: SynthesisReport }
+  | { type: "SYNTHESIS_ERROR"; message: string }
   | { type: "DONE"; totalMs: number; totalCostUsd: number }
   | { type: "STREAM_ERROR"; message: string; code: string };
 
@@ -72,12 +81,16 @@ function freshSurfacing(): SurfacingState {
   return { questions: [], cells: [], pendingCells: [], status: "pending" };
 }
 
+function freshSynthesis(): SynthesisStateSlice {
+  return { tokens: "", report: null, error: null };
+}
+
 const initialState: StreamState = {
   phase: "idle",
   scrapeStage: null,
   surfacing: freshSurfacing(),
   personas: freshPersonas(),
-  synthesis: { tokens: "", report: null },
+  synthesis: freshSynthesis(),
   totalMs: 0,
   totalCostUsd: 0,
   error: null,
@@ -106,6 +119,7 @@ function reducer(state: StreamState, action: Action): StreamState {
         ...initialState,
         personas: freshPersonas(),
         surfacing: freshSurfacing(),
+        synthesis: freshSynthesis(),
       };
 
     case "START":
@@ -113,6 +127,7 @@ function reducer(state: StreamState, action: Action): StreamState {
         ...initialState,
         personas: freshPersonas(),
         surfacing: freshSurfacing(),
+        synthesis: freshSynthesis(),
         isStreaming: true,
       };
 
@@ -225,7 +240,16 @@ function reducer(state: StreamState, action: Action): StreamState {
       };
 
     case "SYNTHESIS_COMPLETE":
-      return { ...state, synthesis: { ...state.synthesis, report: action.report } };
+      return {
+        ...state,
+        synthesis: { ...state.synthesis, report: action.report, error: null },
+      };
+
+    case "SYNTHESIS_ERROR":
+      return {
+        ...state,
+        synthesis: { ...state.synthesis, error: action.message },
+      };
 
     case "DONE":
       return {
@@ -247,6 +271,9 @@ function reducer(state: StreamState, action: Action): StreamState {
       return state;
   }
 }
+
+/** Codes that indicate a non-fatal synthesis fallback rather than a stream-killing error. */
+const SYNTH_FALLBACK_CODES = new Set(["SYNTHESIS_FAILED", "NO_VERDICTS"]);
 
 function sseEventToAction(evt: SseEvent): Action | null {
   switch (evt.event) {
@@ -279,6 +306,9 @@ function sseEventToAction(evt: SseEvent): Action | null {
     case "done":
       return { type: "DONE", totalMs: evt.data.totalMs, totalCostUsd: evt.data.totalCostUsd };
     case "error":
+      if (SYNTH_FALLBACK_CODES.has(evt.data.code)) {
+        return { type: "SYNTHESIS_ERROR", message: evt.data.message };
+      }
       return { type: "STREAM_ERROR", message: evt.data.message, code: evt.data.code };
     default:
       return null;
@@ -350,16 +380,25 @@ export function usePersonaStream(): UsePersonaStreamReturn {
 
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        dispatch({
-          type: "STREAM_ERROR",
-          message: text || `HTTP ${response.status}`,
-          code: `HTTP_${response.status}`,
-        });
+        let message = text || `HTTP ${response.status}`;
+        // Server returns JSON error bodies via errorHandler middleware. Extract the
+        // human-readable message instead of dumping the raw JSON in the status line.
+        try {
+          const parsed = JSON.parse(text) as { error?: { message?: string } };
+          if (parsed.error?.message) message = parsed.error.message;
+        } catch {
+          // Not JSON — fall back to raw text.
+        }
+        const clean = message.replace(/\s+/g, " ").trim().slice(0, 200);
+        toast.error(`Backend error: ${clean}`);
+        dispatch({ type: "STREAM_ERROR", message: clean, code: `HTTP_${response.status}` });
         return;
       }
 
       if (!response.body) {
-        dispatch({ type: "LOCAL_ERROR", message: "Response body is null" });
+        const message = "Response body is null";
+        toast.error(`Backend error: ${message}`);
+        dispatch({ type: "LOCAL_ERROR", message });
         return;
       }
 
@@ -378,15 +417,28 @@ export function usePersonaStream(): UsePersonaStreamReturn {
           buffer = buffer.slice(idx + 2);
           const evt = parseSseBlock(block);
           if (!evt) continue;
+
+          // Side effects (toasts) happen here, before the reducer dispatch.
+          if (evt.event === "done") {
+            toast.success(
+              `Analysis complete. Total cost: $${evt.data.totalCostUsd.toFixed(4)}`,
+            );
+          } else if (evt.event === "error") {
+            // Only toast hard errors. Synthesis fallback is shown inline.
+            if (!SYNTH_FALLBACK_CODES.has(evt.data.code)) {
+              toast.error(`Backend error: ${evt.data.message.slice(0, 200)}`);
+            }
+          }
+
           const action = sseEventToAction(evt);
           if (action) dispatch(action);
         }
       }
     } catch (err) {
-      const isAbort =
-        err instanceof DOMException && err.name === "AbortError";
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
       if (!isAbort) {
         const message = err instanceof Error ? err.message : String(err);
+        toast.error("Lost connection. Click Run to retry.");
         dispatch({ type: "LOCAL_ERROR", message });
       }
     } finally {

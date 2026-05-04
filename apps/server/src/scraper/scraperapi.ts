@@ -64,7 +64,9 @@ const rawProductSchema = z
     feature_bullets: z.array(z.string()).default([]),
     full_description: z.string().optional(),
     images: z.array(z.string()).default([]),
-    product_information: z.record(z.string(), z.string()).optional(),
+    // ScraperAPI returns mixed types here per product (string, array, nested object). Accept anything;
+    // the mapper flattens to Record<string,string> defensively below.
+    product_information: z.record(z.string(), z.unknown()).optional(),
     availability_status: z.string().optional(),
   })
   .passthrough();
@@ -115,7 +117,36 @@ const rawSearchResponseSchema = z
 
 // -- Mappers --
 
+/**
+ * ScraperAPI's product_information field can contain strings, numbers, arrays of strings,
+ * or nested objects depending on the listing. Flatten to Record<string, string> by:
+ * - keeping primitives as their string form
+ * - joining arrays of primitives with ", "
+ * - dropping nested objects (rare; e.g. customer_reviews { stars, count } is redundant with top-level fields)
+ */
+function flattenProductInformation(
+  raw: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string") {
+      out[k] = v;
+    } else if (typeof v === "number" || typeof v === "boolean") {
+      out[k] = String(v);
+    } else if (Array.isArray(v)) {
+      const items = v.filter(
+        (x): x is string | number => typeof x === "string" || typeof x === "number",
+      );
+      if (items.length > 0) out[k] = items.join(", ");
+    }
+    // intentionally skip nested objects/null
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function mapProduct(asin: string, raw: z.infer<typeof rawProductSchema>): AmazonProduct {
+  const features = flattenProductInformation(raw.product_information);
   return {
     asin,
     name: raw.name,
@@ -126,7 +157,7 @@ function mapProduct(asin: string, raw: z.infer<typeof rawProductSchema>): Amazon
     ...(raw.average_rating != null ? { rating: raw.average_rating } : {}),
     ...(raw.total_reviews != null ? { total_reviews: raw.total_reviews } : {}),
     ...(raw.full_description ? { description: raw.full_description } : {}),
-    ...(raw.product_information ? { features: raw.product_information } : {}),
+    ...(features ? { features } : {}),
     ...(raw.availability_status != null
       ? { in_stock: raw.availability_status.toLowerCase().includes("in stock") }
       : {}),

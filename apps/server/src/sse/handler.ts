@@ -8,6 +8,7 @@ import { streamSynthesizer } from "../synthesizer/run.js";
 import { streamSurfacing } from "../surfacing/run.js";
 import { logger } from "../logger.js";
 import { ValidationError } from "../errors.js";
+import { recordDemo } from "../metrics.js";
 import { SseWriter } from "./writer.js";
 import type { Persona, PersonaResult, SurfaceResult } from "../llm/types.js";
 import type { AmazonReview, AmazonSearchResult } from "../types/amazon.js";
@@ -15,6 +16,14 @@ import type { AmazonReview, AmazonSearchResult } from "../types/amazon.js";
 const StreamRequestZ = z.object({
   productUrl: z.string().url(),
 });
+
+/** Handler-level timeout. Aborts all in-flight Azure calls + returns whatever has streamed. */
+const TOTAL_HANDLER_TIMEOUT_MS = 4 * 60 * 1000;
+
+/** Collapse newlines and truncate so error messages are safe to render in a single status line / toast. */
+function sanitizeErrorMessage(message: string): string {
+  return message.replace(/\s+/g, " ").trim().slice(0, 200);
+}
 
 interface PersonaTotals {
   inputTokens: number;
@@ -82,8 +91,21 @@ export async function streamPersonasHandler(
     throw new ValidationError("Could not extract ASIN from productUrl");
   }
 
+  logger.info({ event: "demo_started", requestId, asin }, "demo started");
+
   const writer = new SseWriter(res);
   const controller = new AbortController();
+
+  // Total handler timeout — aborts in-flight upstream calls if the demo runs too long.
+  const totalTimeoutHandle = setTimeout(() => {
+    if (!controller.signal.aborted) {
+      logger.error(
+        { event: "demo_error", requestId, asin, phase: "timeout", error: { code: "TOTAL_TIMEOUT", message: "demo exceeded 4-minute total handler timeout" } },
+        "demo timeout",
+      );
+      controller.abort();
+    }
+  }, TOTAL_HANDLER_TIMEOUT_MS);
 
   const onClose = (source: string) => (): void => {
     if (!controller.signal.aborted) {
@@ -100,7 +122,17 @@ export async function streamPersonasHandler(
   req.on("close", onReqClose);
   res.on("close", onResClose);
 
+  // Track per-phase metrics so we can emit demo_complete + record() at the end.
+  let surfacingAttempted = 0;
+  let surfacingSuccess = 0;
+  let personaSuccessCount = 0;
+  let demoErrored = false;
+  const personaTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };
+  const synthTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };
+
   try {
+    // ===== SCRAPING =====
+    const scrapingStart = Date.now();
     writer.send("phase", { phase: "scraping" });
 
     writer.send("scrape-progress", { stage: "product", message: `Fetching product ${asin}` });
@@ -112,7 +144,11 @@ export async function streamPersonasHandler(
     try {
       reviews = await getReviewsCached(asin, 100);
       writer.send("scrape-progress", { stage: "reviews", message: `Got ${reviews.length} reviews` });
+      if (reviews.length === 0) {
+        logger.warn({ requestId, asin }, "sse.handler: 0 reviews returned");
+      }
     } catch {
+      logger.warn({ requestId, asin }, "sse.handler: reviews fetch failed");
       writer.send("scrape-progress", { stage: "reviews", message: "Reviews unavailable, continuing" });
     }
 
@@ -122,9 +158,27 @@ export async function streamPersonasHandler(
       const query = product.name.split(" ").slice(0, 4).join(" ");
       competitors = await searchAmazonCached(query, 8);
       writer.send("scrape-progress", { stage: "competitors", message: `Got ${competitors.length} competitors` });
+      if (competitors.length === 0) {
+        logger.warn({ requestId, asin }, "sse.handler: 0 competitors returned");
+        writer.send("scrape-progress", { stage: "competitors", message: "No competitors found" });
+      }
     } catch {
+      logger.warn({ requestId, asin }, "sse.handler: competitor search failed");
       writer.send("scrape-progress", { stage: "competitors", message: "Competitors unavailable, continuing" });
     }
+
+    logger.info(
+      {
+        event: "phase_complete",
+        phase: "scraping",
+        durationMs: Date.now() - scrapingStart,
+        requestId,
+        asin,
+        reviewsCount: reviews.length,
+        competitorsCount: competitors.length,
+      },
+      "scraping complete",
+    );
 
     if (controller.signal.aborted) {
       writer.close();
@@ -132,7 +186,8 @@ export async function streamPersonasHandler(
       return;
     }
 
-    // ----- SURFACING PHASE -----
+    // ===== SURFACING =====
+    const surfacingStart = Date.now();
     writer.send("phase", { phase: "surfacing" });
     const surfaceResults: SurfaceResult[] = [];
     let surfacingQuestionCount = 0;
@@ -155,16 +210,23 @@ export async function streamPersonasHandler(
       }
     }
 
+    surfacingAttempted = surfaceResults.length;
+    surfacingSuccess = surfaceResults.filter((r) => r.error === null).length;
+
     logger.info(
       {
+        event: "phase_complete",
+        phase: "surfacing",
+        durationMs: Date.now() - surfacingStart,
         requestId,
         asin,
         surfacingQuestionCount,
-        surfacingCells: surfaceResults.length,
+        surfacingCells: surfacingAttempted,
+        surfacingSuccess,
         surfacingGreens: surfaceResults.filter((r) => r.score === "green").length,
         surfacingReds: surfaceResults.filter((r) => r.score === "red").length,
       },
-      "sse.handler: surfacing phase complete",
+      "surfacing complete",
     );
 
     if (controller.signal.aborted) {
@@ -173,13 +235,13 @@ export async function streamPersonasHandler(
       return;
     }
 
-    // ----- PERSONAS PHASE -----
+    // ===== PERSONAS =====
+    const personasStart = Date.now();
     const brief = buildBrief(product, reviews, competitors);
     logger.info({ requestId, asin, briefChars: brief.length }, "sse.handler: brief built");
 
     writer.send("phase", { phase: "personas" });
 
-    const personaTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };
     const settled = await Promise.allSettled(
       PERSONAS.map((p) => runOnePersona(p, brief, controller.signal, writer, personaTotals)),
     );
@@ -189,14 +251,20 @@ export async function streamPersonasHandler(
       .map((s) => s.value)
       .filter((v): v is PersonaResult => v !== null);
 
+    personaSuccessCount = successfulResults.length;
+
     logger.info(
       {
+        event: "phase_complete",
+        phase: "personas",
+        durationMs: Date.now() - personasStart,
         requestId,
         asin,
-        successCount: successfulResults.length,
+        personaSuccessCount,
+        personaAttempted: PERSONAS.length,
         personaTotals,
       },
-      "sse.handler: persona phase complete",
+      "personas complete",
     );
 
     if (controller.signal.aborted) {
@@ -205,22 +273,19 @@ export async function streamPersonasHandler(
       return;
     }
 
-    // ----- SYNTHESIS PHASE -----
+    // ===== SYNTHESIS =====
+    const synthesisStart = Date.now();
     writer.send("phase", { phase: "synthesis" });
 
-    const synthTotals: PersonaTotals = { inputTokens: 0, outputTokens: 0 };
+    let synthesisCompleted = false;
 
     if (successfulResults.length === 0) {
       logger.warn({ requestId, asin }, "sse.handler: no successful verdicts, skipping synthesis");
-      writer.send("synthesis-token", {
-        token: "Synthesis skipped: no persona verdicts succeeded.",
-      });
       writer.send("error", {
-        message: "No persona verdicts to synthesize",
+        message: "Could not generate synthesis. No persona verdicts succeeded.",
         code: "NO_VERDICTS",
       });
     } else {
-      let synthesisCompleted = false;
       for await (const event of streamSynthesizer(
         successfulResults,
         product,
@@ -236,18 +301,28 @@ export async function streamPersonasHandler(
           writer.send("synthesis-complete", { report: event.data.report });
           synthesisCompleted = true;
         } else {
+          // Synthesis failed (parse / validation / upstream). Send a non-fatal error so
+          // the frontend renders the inline fallback while keeping persona verdicts intact.
           writer.send("error", {
-            message: event.data.message,
+            message: "Could not generate synthesis. Persona verdicts available below.",
             code: "SYNTHESIS_FAILED",
           });
         }
       }
-
-      logger.info(
-        { requestId, asin, synthTotals, synthesisCompleted },
-        "sse.handler: synthesizer cost",
-      );
     }
+
+    logger.info(
+      {
+        event: "phase_complete",
+        phase: "synthesis",
+        durationMs: Date.now() - synthesisStart,
+        requestId,
+        asin,
+        synthesisCompleted,
+        synthTotals,
+      },
+      "synthesis complete",
+    );
 
     if (controller.signal.aborted) {
       writer.close();
@@ -263,28 +338,54 @@ export async function streamPersonasHandler(
 
     logger.info(
       {
+        event: "demo_complete",
         requestId,
         asin,
-        totalMs,
+        totalDurationMs: totalMs,
         totalCostUsd,
-        personaTotals,
-        synthTotals,
+        personaSuccessCount,
+        personaAttempted: PERSONAS.length,
+        surfacingSuccess,
+        surfacingAttempted,
+        synthesisCompleted,
       },
-      "sse.handler: stream complete",
+      "demo complete",
     );
 
     writer.close();
     res.end();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.error({ requestId, asin, err: message }, "sse.handler: stream failed");
+    demoErrored = true;
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const message = sanitizeErrorMessage(rawMessage);
+    logger.error(
+      {
+        event: "demo_error",
+        requestId,
+        asin,
+        phase: "stream",
+        error: { code: "STREAM_FAILED", message: rawMessage },
+      },
+      "demo failed",
+    );
     if (!writer.isClosed()) {
       writer.send("error", { message, code: "STREAM_FAILED" });
       writer.close();
     }
     if (!res.writableEnded) res.end();
   } finally {
+    clearTimeout(totalTimeoutHandle);
     req.off("close", onReqClose);
     res.off("close", onResClose);
+
+    recordDemo({
+      durationMs: Date.now() - startedAt,
+      costUsd: 0,
+      personaSuccess: personaSuccessCount,
+      personaAttempted: PERSONAS.length,
+      surfacingSuccess,
+      surfacingAttempted,
+      errored: demoErrored,
+    });
   }
 }

@@ -15,6 +15,7 @@ interface Props {
   phase: "idle" | SsePhase;
   report: SynthesisReport | null;
   streamingText: string;
+  error: string | null;
 }
 
 const SEVERITY_DOT: Record<Severity, string> = {
@@ -232,7 +233,25 @@ function ReportView({ report }: { report: SynthesisReport }) {
   );
 }
 
-export function SynthesisPanel({ phase, report, streamingText }: Props) {
+function FallbackView({ message }: { message: string }) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <span aria-hidden className="h-2 w-2 rounded-full bg-warn" />
+        <h2 className="font-display text-xs font-semibold uppercase tracking-wide text-muted">
+          Synthesis unavailable
+        </h2>
+      </div>
+      <p className="font-display text-sm leading-relaxed text-text">{message}</p>
+      <p className="text-xs text-muted">
+        The persona verdicts above remain valid. Try re-running the analysis to retry the
+        synthesizer.
+      </p>
+    </div>
+  );
+}
+
+export function SynthesisPanel({ phase, report, streamingText, error }: Props) {
   const reduced = useReducedMotion();
   const visible = phase === "synthesis" || phase === "done";
 
@@ -253,6 +272,8 @@ export function SynthesisPanel({ phase, report, streamingText }: Props) {
           <Card className="gap-0 border-border bg-surface p-6">
             {report ? (
               <ReportView report={report} />
+            ) : error ? (
+              <FallbackView message={error} />
             ) : (
               <StreamingView text={streamingText} />
             )}

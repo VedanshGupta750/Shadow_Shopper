@@ -4,7 +4,7 @@ import { logger } from "../logger.js";
 import { AppError, UpstreamError } from "../errors.js";
 import type { Persona, PersonaResult, PersonaVerdict } from "./types.js";
 
-const TIMEOUT_MS = 25_000;
+const TIMEOUT_MS = 60_000;
 const RETRY_BASE_MS = 1_000;
 const MAX_ATTEMPTS = 2;
 

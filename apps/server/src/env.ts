@@ -11,6 +11,7 @@ const envSchema = z.object({
   DEPLOYMENT_NAME: z.string().min(1),
   SCRAPERAPI_KEY: z.string().min(1),
   FRONTEND_ORIGIN: z.string().url(),
+  ADMIN_SECRET: z.string().min(8).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
