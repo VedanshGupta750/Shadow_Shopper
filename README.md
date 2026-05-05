@@ -53,7 +53,7 @@ You paste an Amazon product URL. Five phases run in order, each streaming result
 
 | # | Phase | Duration | What happens |
 |---|---|---|---|
-| 1 | **Scrape** | 5-15s | ScraperAPI fetches product details, up to 100 reviews, and a competitor search (8 results). Filesystem-cached 7 days by SHA-1 of the request URL — so dev iteration on the same ASIN is free. |
+| 1 | **Scrape** | 5-15s | ScraperAPI fetches product details, up to 100 reviews, and a competitor search (8 results). Filesystem-cached for 7 days by SHA-1 of the request URL — so dev iteration on the same ASIN is free. |
 | 2 | **AI surfacing audit** | 10-15s | 5 GPT-generated buyer questions × 2 simulated surfaces (Rufus + ChatGPT shopping mode) = 10 cells, scored green/yellow/red based on whether the listing surfaces and at what position. |
 | 3 | **10 personas in parallel** | 8-15s | All 10 buyer personas consume the same product brief and stream structured verdicts simultaneously (`would-buy` / `would-not-buy` / `would-buy-competitor` + confidence + friction points + competitor named + headline quote). |
 | 4 | **Synthesis** | 5-10s | One GPT-4o call aggregates all signals into top 3 friction points, top 3 conversion levers, winning competitor, and a revenue-at-risk range with the math shown explicitly. |
