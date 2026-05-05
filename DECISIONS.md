@@ -8,9 +8,9 @@ Every major choice in Shadow Shopper, framed as a trade-off rather than a forego
 
 **What we did:** Single Azure OpenAI GPT-4o deployment for every LLM call in the system. One model, one auth scheme, one rate-limit budget to reason about. Every structured output uses `response_format: json_schema` with `strict: true` so we get parser-rejection at the model layer, not at the Zod layer.
 
-**Trade-off:** No model diversity. If GPT-4o has a specific weakness — Claude's longer thinking might produce better synthesis, or a smaller model might be cheaper for the surfacing simulators — we can't mix-and-match without adding a second auth path, second SDK, second rate limiter. We also accept Azure's stricter rate limits over OpenAI's direct API.
+**Trade-off:** No model diversity. If GPT-4o has a specific weakness — a longer-context reasoning model might produce better synthesis, or a smaller model might be cheaper for the surfacing simulators — we can't mix-and-match without adding a second auth path, second SDK, second rate limiter. We also accept Azure's stricter rate limits over OpenAI's direct API.
 
-**Switch criteria:** We'd move to a hybrid (Claude Sonnet 4.6 for synthesis, GPT-4o for the 10 personas, smaller model for surfacing) when synthesis output starts feeling formulaic OR when token volume on the persona fan-out makes the surfacing calls a meaningful slice of the bill — at which point cheaper-per-call surfaces become worth the integration cost.
+**Switch criteria:** We'd move to a hybrid (a reasoning-tier model for synthesis, GPT-4o for the 10 personas, a smaller model for surfacing) when synthesis output starts feeling formulaic OR when token volume on the persona fan-out makes the surfacing calls a meaningful slice of the bill — at which point cheaper-per-call surfaces become worth the integration cost.
 
 ## Backend hosting: We chose Render Free + UptimeRobot over Railway/Fly.io paid
 

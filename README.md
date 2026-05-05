@@ -463,7 +463,6 @@ shadow-shopper/
 ├── DECISIONS.md                  # 7 trade-offs with switch criteria
 ├── EVAL.md                       # honest 3-ASIN performance assessment
 ├── DEPLOYMENT.md                 # Render + UptimeRobot + Vercel walkthrough
-├── CLAUDE.md                     # codebase conventions + current phase
 ├── docs/
 │   ├── architecture.txt          # ASCII architecture diagram
 │   └── hero.gif                  # demo screen capture (manual)

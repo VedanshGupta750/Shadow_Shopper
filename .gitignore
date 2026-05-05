@@ -6,6 +6,6 @@ dist
 *.log
 coverage
 
-# Claude Code session state and scratch dirs
+# local AI tool / scratch dirs
 .claude/
 .tmp/
