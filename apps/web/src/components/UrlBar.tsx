@@ -74,7 +74,7 @@ export const UrlBar = forwardRef<UrlBarHandle, Props>(function UrlBar(
           disabled={isStreaming}
         />
         {isStreaming ? (
-          <motion.div {...(tapAnim ? { whileTap: tapAnim } : {})}>
+          <motion.div tabIndex={-1} {...(tapAnim ? { whileTap: tapAnim } : {})}>
             <Button
               type="submit"
               className="bg-danger text-bg hover:bg-danger/90 focus-visible:ring-danger/50"
@@ -85,7 +85,7 @@ export const UrlBar = forwardRef<UrlBarHandle, Props>(function UrlBar(
             </Button>
           </motion.div>
         ) : (
-          <motion.div {...(tapAnim ? { whileTap: tapAnim } : {})}>
+          <motion.div tabIndex={-1} {...(tapAnim ? { whileTap: tapAnim } : {})}>
             <Button
               type="submit"
               className="bg-accent text-bg hover:bg-accent/90 focus-visible:ring-accent/50"

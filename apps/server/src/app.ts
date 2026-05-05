@@ -3,24 +3,30 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
+import { env } from "./env.js";
 import { requestId } from "./middleware/requestId.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { asyncHandler } from "./middleware/asyncHandler.js";
 import { streamPersonasHandler } from "./sse/handler.js";
+import { generateFixHandler } from "./synthesizer/generateFix.js";
+import { surfaceQuestionHandler } from "./surfacing/customQuestion.js";
 import { getMetricsSnapshot } from "./metrics.js";
 import { logger } from "./logger.js";
 
 export function createApp() {
   const app = express();
 
+  // Render sits behind a single reverse proxy. Trust it so req.ip and X-Forwarded-* are honored
+  // (correct rate-limit keying, accurate request logs).
+  app.set("trust proxy", 1);
+
   app.use(requestId);
   app.use(helmet());
 
-  const isProduction = process.env["NODE_ENV"] === "production";
-  const devOrigin = "http://localhost:5173";
-  const allowedOrigins = isProduction
-    ? [process.env["FRONTEND_ORIGIN"]].filter((o): o is string => Boolean(o))
-    : [devOrigin];
+  const allowedOrigins =
+    env.NODE_ENV === "production"
+      ? env.FRONTEND_ORIGIN
+      : ["http://localhost:5173", env.FRONTEND_ORIGIN];
   app.use(
     cors({
       origin: allowedOrigins,
@@ -64,6 +70,8 @@ export function createApp() {
   });
 
   app.post("/api/stream-personas", streamLimiter, asyncHandler(streamPersonasHandler));
+  app.post("/api/generate-fix", streamLimiter, asyncHandler(generateFixHandler));
+  app.post("/api/surface-question", streamLimiter, asyncHandler(surfaceQuestionHandler));
 
   // Admin-only metrics endpoint, gated by ADMIN_SECRET shared header.
   // When ADMIN_SECRET is unset, /metrics returns 503 to avoid accidental exposure.

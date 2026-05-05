@@ -138,6 +138,15 @@ export async function streamPersonasHandler(
     writer.send("scrape-progress", { stage: "product", message: `Fetching product ${asin}` });
     const product = await getProductCached(asin);
     writer.send("scrape-progress", { stage: "product", message: `Got: ${product.name.slice(0, 80)}` });
+    writer.send("product-meta", {
+      asin,
+      name: product.name,
+      brand: product.brand,
+      price: product.price_string,
+      bullets: product.bullets.slice(0, 8),
+      rating: product.rating ?? null,
+      totalReviews: product.total_reviews ?? null,
+    });
 
     let reviews: AmazonReview[] = [];
     writer.send("scrape-progress", { stage: "reviews", message: "Fetching reviews" });

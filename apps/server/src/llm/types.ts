@@ -84,3 +84,13 @@ export interface SurfaceResult {
   /** Set when the simulator call failed. UI renders gray instead of the score color. */
   error: string | null;
 }
+
+/** Paste-ready listing copy generated for a single conversion lever. */
+export interface GeneratedFix {
+  /** 3-5 complete, paste-ready bullet points for the listing. */
+  bullet_rewrites: string[];
+  /** One paragraph (80-150 words) describing an A+ Content section. */
+  a_plus_suggestion: string;
+  /** One paragraph (60-120 words) describing a lifestyle photo for the listing. */
+  image_brief: string;
+}

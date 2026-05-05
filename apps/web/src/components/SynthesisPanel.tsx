@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { ArrowRight } from "lucide-react";
 import {
   AnimatePresence,
   animate,
@@ -6,16 +7,48 @@ import {
   useReducedMotion,
   type Variants,
 } from "motion/react";
-import type { Severity, SynthesisReport, SsePhase } from "../types/sse";
+import type {
+  ProductMeta,
+  Severity,
+  SynthesisReport,
+  SsePhase,
+} from "../types/sse";
+import type { GeneratedFix } from "../types/synth";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { GenerateFixDialog } from "./GenerateFixDialog";
+import { API_BASE_URL } from "../lib/api";
 import { cn } from "@/lib/utils";
+
+interface FixModalState {
+  open: boolean;
+  leverIndex: number | null;
+  loading: boolean;
+  result: GeneratedFix | null;
+  error: string | null;
+  cached: boolean;
+}
+
+const INITIAL_FIX_MODAL: FixModalState = {
+  open: false,
+  leverIndex: null,
+  loading: false,
+  result: null,
+  error: null,
+  cached: false,
+};
 
 interface Props {
   phase: "idle" | SsePhase;
   report: SynthesisReport | null;
   streamingText: string;
   error: string | null;
+  productMeta?: ProductMeta | null;
+  /** Cached generated fixes for this analysis, keyed by lever index. */
+  fixCache?: Record<number, GeneratedFix>;
+  /** Called after a successful generate-fix fetch so the parent can persist the result. */
+  onFixGenerated?: (leverIndex: number, fix: GeneratedFix) => void;
 }
 
 const SEVERITY_DOT: Record<Severity, string> = {
@@ -111,7 +144,15 @@ const REDUCED_SECTION_VARIANTS: Variants = {
   show: (_i: number) => ({ opacity: 1, transition: { duration: 0.2 } }),
 };
 
-function ReportView({ report }: { report: SynthesisReport }) {
+function ReportView({
+  report,
+  onGenerateFix,
+  fixCache,
+}: {
+  report: SynthesisReport;
+  onGenerateFix: (leverIndex: number) => void;
+  fixCache: Record<number, GeneratedFix> | undefined;
+}) {
   const reduced = useReducedMotion();
   const sectionVariants = reduced ? REDUCED_SECTION_VARIANTS : SECTION_VARIANTS;
 
@@ -177,7 +218,7 @@ function ReportView({ report }: { report: SynthesisReport }) {
           <ColumnHeading>Conversion levers</ColumnHeading>
           <ul className="flex flex-col gap-3">
             {report.top_conversion_levers.map((l, i) => (
-              <li key={i} className="flex flex-col gap-1">
+              <li key={i} className="flex flex-col gap-1.5">
                 <div className="flex items-start justify-between gap-2">
                   <span className="font-display text-sm font-medium text-text">
                     {l.recommendation}
@@ -185,6 +226,18 @@ function ReportView({ report }: { report: SynthesisReport }) {
                   <ImpactPill impact={l.expected_impact} />
                 </div>
                 <p className="text-xs leading-relaxed text-muted">{l.reasoning}</p>
+                <div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onGenerateFix(i)}
+                    className="border-accent/40 bg-surface text-accent hover:bg-accent/10 hover:text-accent"
+                  >
+                    {fixCache?.[i] ? "View saved copy" : "Generate copy"}
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </li>
             ))}
           </ul>
@@ -251,35 +304,186 @@ function FallbackView({ message }: { message: string }) {
   );
 }
 
-export function SynthesisPanel({ phase, report, streamingText, error }: Props) {
+export function SynthesisPanel({
+  phase,
+  report,
+  streamingText,
+  error,
+  productMeta,
+  fixCache,
+  onFixGenerated,
+}: Props) {
   const reduced = useReducedMotion();
   const visible = phase === "synthesis" || phase === "done";
 
-  return (
-    <AnimatePresence>
-      {visible && (
-        <motion.section
-          key="synthesis"
-          initial={reduced ? { opacity: 0 } : { y: 60, opacity: 0 }}
-          animate={reduced ? { opacity: 1 } : { y: 0, opacity: 1 }}
-          exit={reduced ? { opacity: 0 } : { y: 30, opacity: 0 }}
-          transition={
-            reduced
-              ? { duration: 0.2 }
-              : { type: "spring", stiffness: 90, damping: 18 }
+  const [fixModal, setFixModal] = useState<FixModalState>(INITIAL_FIX_MODAL);
+
+  const runGenerateFix = useCallback(
+    async (leverIndex: number, currentReport: SynthesisReport) => {
+      const lever = currentReport.top_conversion_levers[leverIndex];
+      if (!lever) return;
+
+      const personaSignals = currentReport.top_friction_points
+        .map((f) => f.evidence)
+        .slice(0, 5);
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/generate-fix`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lever: {
+              recommendation: lever.recommendation,
+              reasoning: lever.reasoning,
+            },
+            productContext: {
+              title: productMeta?.name ?? "",
+              brand: productMeta?.brand ?? "",
+              currentBullets: productMeta?.bullets ?? [],
+            },
+            personaSignals,
+          }),
+        });
+
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          let message = text || `HTTP ${response.status}`;
+          try {
+            const parsed = JSON.parse(text) as { error?: { message?: string } };
+            if (parsed.error?.message) message = parsed.error.message;
+          } catch {
+            // fall back to raw text
           }
-        >
-          <Card className="gap-0 border-border bg-surface p-6">
-            {report ? (
-              <ReportView report={report} />
-            ) : error ? (
-              <FallbackView message={error} />
-            ) : (
-              <StreamingView text={streamingText} />
-            )}
-          </Card>
-        </motion.section>
-      )}
-    </AnimatePresence>
+          setFixModal((prev) => ({
+            ...prev,
+            loading: false,
+            error: message.slice(0, 200),
+          }));
+          return;
+        }
+
+        const json = (await response.json()) as GeneratedFix;
+        setFixModal((prev) => ({
+          ...prev,
+          loading: false,
+          result: json,
+          cached: false,
+        }));
+        onFixGenerated?.(leverIndex, json);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setFixModal((prev) => ({ ...prev, loading: false, error: message }));
+      }
+    },
+    [productMeta, onFixGenerated],
+  );
+
+  const handleGenerateFix = useCallback(
+    (leverIndex: number) => {
+      if (!report) return;
+      const cachedFix = fixCache?.[leverIndex];
+      if (cachedFix) {
+        setFixModal({
+          open: true,
+          leverIndex,
+          loading: false,
+          result: cachedFix,
+          error: null,
+          cached: true,
+        });
+        return;
+      }
+      setFixModal({
+        open: true,
+        leverIndex,
+        loading: true,
+        result: null,
+        error: null,
+        cached: false,
+      });
+      void runGenerateFix(leverIndex, report);
+    },
+    [report, fixCache, runGenerateFix],
+  );
+
+  const handleRetry = useCallback(() => {
+    if (!report || fixModal.leverIndex === null) return;
+    setFixModal((prev) => ({
+      ...prev,
+      loading: true,
+      result: null,
+      error: null,
+      cached: false,
+    }));
+    void runGenerateFix(fixModal.leverIndex, report);
+  }, [report, fixModal.leverIndex, runGenerateFix]);
+
+  const handleRegenerate = useCallback(() => {
+    if (!report || fixModal.leverIndex === null) return;
+    setFixModal((prev) => ({
+      ...prev,
+      loading: true,
+      result: null,
+      error: null,
+      cached: false,
+    }));
+    void runGenerateFix(fixModal.leverIndex, report);
+  }, [report, fixModal.leverIndex, runGenerateFix]);
+
+  const handleOpenChange = useCallback((open: boolean) => {
+    setFixModal((prev) =>
+      open ? { ...prev, open: true } : { ...INITIAL_FIX_MODAL },
+    );
+  }, []);
+
+  const activeLeverRecommendation =
+    fixModal.leverIndex !== null && report
+      ? (report.top_conversion_levers[fixModal.leverIndex]?.recommendation ?? "")
+      : "";
+
+  return (
+    <>
+      <AnimatePresence>
+        {visible && (
+          <motion.section
+            key="synthesis"
+            initial={reduced ? { opacity: 0 } : { y: 60, opacity: 0 }}
+            animate={reduced ? { opacity: 1 } : { y: 0, opacity: 1 }}
+            exit={reduced ? { opacity: 0 } : { y: 30, opacity: 0 }}
+            transition={
+              reduced
+                ? { duration: 0.2 }
+                : { type: "spring", stiffness: 90, damping: 18 }
+            }
+          >
+            <Card className="gap-0 border-border bg-surface p-6">
+              {report ? (
+                <ReportView
+                  report={report}
+                  onGenerateFix={handleGenerateFix}
+                  fixCache={fixCache}
+                />
+              ) : error ? (
+                <FallbackView message={error} />
+              ) : (
+                <StreamingView text={streamingText} />
+              )}
+            </Card>
+          </motion.section>
+        )}
+      </AnimatePresence>
+
+      <GenerateFixDialog
+        open={fixModal.open}
+        onOpenChange={handleOpenChange}
+        loading={fixModal.loading}
+        result={fixModal.result}
+        error={fixModal.error}
+        onRetry={handleRetry}
+        leverRecommendation={activeLeverRecommendation}
+        cached={fixModal.cached}
+        onRegenerate={handleRegenerate}
+      />
+    </>
   );
 }

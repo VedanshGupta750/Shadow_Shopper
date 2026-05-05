@@ -72,6 +72,7 @@ export function buildBrief(
   }
 
   const mixed = mixReviews(reviews, 10);
+  const totalReviews = product.total_reviews ?? 0;
   if (mixed.length > 0) {
     lines.push("");
     lines.push("## Customer Reviews (sample, mixed high/low)");
@@ -80,10 +81,21 @@ export function buildBrief(
       const body = review.body.slice(0, 200);
       lines.push(`[${review.rating}★${verified}] "${review.title}": ${body}`);
     }
+  } else if (totalReviews > 0) {
+    // The listing HAS reviews (per the aggregate count above), we just couldn't fetch sample text.
+    // Personas should NOT cite "no reviews available" as friction — that would be a data-pipeline
+    // artifact, not a real listing weakness.
+    lines.push("");
+    lines.push("## Customer Reviews");
+    lines.push(
+      `Review samples are not included in this brief, but the listing has ${totalReviews} reviews with an aggregate rating of ${product.rating ?? "N/A"}/5 (shown above). Do NOT cite "no reviews" as a listing weakness — the reviews exist on the live page, only the sample text was unavailable to this brief.`,
+    );
   } else {
     lines.push("");
     lines.push("## Customer Reviews");
-    lines.push("No individual reviews available. Only aggregate rating shown above.");
+    lines.push(
+      "No reviews on this listing — this is a new, low-traffic, or thin listing. Treat this as a real friction point: shoppers cannot validate quality from peer feedback.",
+    );
   }
 
   if (competitors.length > 0) {

@@ -56,9 +56,20 @@ export interface SurfaceResult {
 
 export type SsePhase = "scraping" | "surfacing" | "personas" | "synthesis" | "done";
 
+export interface ProductMeta {
+  asin: string;
+  name: string;
+  brand: string;
+  price: string;
+  bullets: string[];
+  rating: number | null;
+  totalReviews: number | null;
+}
+
 export type SseEvent =
   | { event: "phase"; data: { phase: SsePhase } }
   | { event: "scrape-progress"; data: { stage: string; message: string } }
+  | { event: "product-meta"; data: ProductMeta }
   | { event: "surfacing-questions"; data: { questions: string[] } }
   | { event: "surfacing-cell-start"; data: { question: string; surface: AiSurface } }
   | { event: "surfacing-cell-result"; data: SurfaceResult }

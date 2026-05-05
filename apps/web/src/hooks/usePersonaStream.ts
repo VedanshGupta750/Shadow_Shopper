@@ -2,9 +2,19 @@ import { useCallback, useReducer, useRef } from "react";
 import { toast } from "sonner";
 import { API_BASE_URL } from "../lib/api";
 import { PERSONA_METADATA } from "../lib/personaMetadata";
+import {
+  attachCustomSurfacing,
+  attachFix,
+  newAnalysisId,
+  saveAnalysis,
+  type HistoryEntry,
+  type PersonaSnapshot,
+} from "../lib/history";
+import type { GeneratedFix } from "../types/synth";
 import type {
   AiSurface,
   PersonaVerdict,
+  ProductMeta,
   SseEvent,
   SsePhase,
   SurfaceResult,
@@ -28,6 +38,12 @@ export interface SurfacingState {
   /** Cells currently in flight (started, no result yet). */
   pendingCells: { question: string; surface: AiSurface }[];
   status: SurfacingStatus;
+  /** User-submitted custom questions (in submission order). */
+  customQuestions: string[];
+  /** Results for custom questions: 2 SurfaceResult entries per question (rufus + chatgpt). */
+  customCells: SurfaceResult[];
+  /** Custom questions currently in flight. */
+  customPending: string[];
 }
 
 export interface SynthesisStateSlice {
@@ -38,6 +54,16 @@ export interface SynthesisStateSlice {
 }
 
 export interface StreamState {
+  /** Stable id for the current run / loaded history entry. Null when idle. */
+  analysisId: string | null;
+  /** Product URL the current analysis is bound to (used for history storage). */
+  productUrl: string | null;
+  /** Product metadata captured from the SSE product-meta event. Null until scrape completes. */
+  productMeta: ProductMeta | null;
+  /** Generated-Fix outputs cached for the current analysis, keyed by lever index. */
+  fixes: Record<number, GeneratedFix>;
+  /** True when the state was hydrated from a saved history entry, rather than a live run. */
+  loadedFromHistory: boolean;
   phase: "idle" | SsePhase;
   scrapeStage: { stage: string; message: string } | null;
   surfacing: SurfacingState;
@@ -47,15 +73,17 @@ export interface StreamState {
   totalCostUsd: number;
   error: string | null;
   isStreaming: boolean;
+  cancelled: boolean;
 }
 
 type Action =
   | { type: "RESET" }
-  | { type: "START" }
+  | { type: "START"; analysisId: string; productUrl: string }
   | { type: "CANCEL" }
   | { type: "LOCAL_ERROR"; message: string }
   | { type: "PHASE"; phase: SsePhase }
   | { type: "SCRAPE_PROGRESS"; stage: string; message: string }
+  | { type: "PRODUCT_META"; meta: ProductMeta }
   | { type: "SURFACING_QUESTIONS"; questions: string[] }
   | { type: "SURFACING_CELL_START"; question: string; surface: AiSurface }
   | { type: "SURFACING_CELL_RESULT"; result: SurfaceResult }
@@ -67,7 +95,12 @@ type Action =
   | { type: "SYNTHESIS_COMPLETE"; report: SynthesisReport }
   | { type: "SYNTHESIS_ERROR"; message: string }
   | { type: "DONE"; totalMs: number; totalCostUsd: number }
-  | { type: "STREAM_ERROR"; message: string; code: string };
+  | { type: "STREAM_ERROR"; message: string; code: string }
+  | { type: "LOAD_HISTORY"; entry: HistoryEntry }
+  | { type: "ATTACH_FIX"; leverIndex: number; fix: GeneratedFix }
+  | { type: "CUSTOM_SURFACING_START"; question: string }
+  | { type: "CUSTOM_SURFACING_RESULT"; question: string; results: SurfaceResult[] }
+  | { type: "CUSTOM_SURFACING_ERROR"; question: string; message: string };
 
 function freshPersonas(): Record<string, PersonaState> {
   const out: Record<string, PersonaState> = {};
@@ -78,7 +111,15 @@ function freshPersonas(): Record<string, PersonaState> {
 }
 
 function freshSurfacing(): SurfacingState {
-  return { questions: [], cells: [], pendingCells: [], status: "pending" };
+  return {
+    questions: [],
+    cells: [],
+    pendingCells: [],
+    status: "pending",
+    customQuestions: [],
+    customCells: [],
+    customPending: [],
+  };
 }
 
 function freshSynthesis(): SynthesisStateSlice {
@@ -86,6 +127,11 @@ function freshSynthesis(): SynthesisStateSlice {
 }
 
 const initialState: StreamState = {
+  analysisId: null,
+  productUrl: null,
+  productMeta: null,
+  fixes: {},
+  loadedFromHistory: false,
   phase: "idle",
   scrapeStage: null,
   surfacing: freshSurfacing(),
@@ -95,6 +141,7 @@ const initialState: StreamState = {
   totalCostUsd: 0,
   error: null,
   isStreaming: false,
+  cancelled: false,
 };
 
 function updatePersona(
@@ -120,15 +167,83 @@ function reducer(state: StreamState, action: Action): StreamState {
         personas: freshPersonas(),
         surfacing: freshSurfacing(),
         synthesis: freshSynthesis(),
+        fixes: {},
       };
 
     case "START":
       return {
         ...initialState,
+        analysisId: action.analysisId,
+        productUrl: action.productUrl,
+        productMeta: null,
+        fixes: {},
+        loadedFromHistory: false,
         personas: freshPersonas(),
         surfacing: freshSurfacing(),
         synthesis: freshSynthesis(),
         isStreaming: true,
+      };
+
+    case "PRODUCT_META":
+      return { ...state, productMeta: action.meta };
+
+    case "LOAD_HISTORY": {
+      const e = action.entry;
+      const personas: Record<string, PersonaState> = {};
+      for (const meta of PERSONA_METADATA) {
+        const snap = e.personas[meta.id];
+        if (snap?.status === "done" && snap.verdict) {
+          personas[meta.id] = {
+            tokens: snap.verdict.inner_monologue,
+            status: "done",
+            verdict: snap.verdict,
+          };
+        } else if (snap?.status === "error") {
+          personas[meta.id] = {
+            tokens: "",
+            status: "error",
+            error: snap.error ?? "error",
+          };
+        } else {
+          personas[meta.id] = { tokens: "", status: "pending" };
+        }
+      }
+      return {
+        ...initialState,
+        analysisId: e.id,
+        productUrl: e.productUrl,
+        productMeta: e.productMeta,
+        fixes: { ...e.fixes },
+        loadedFromHistory: true,
+        phase: "done",
+        scrapeStage: null,
+        surfacing: {
+          questions: e.surfacing.questions,
+          cells: e.surfacing.cells,
+          pendingCells: [],
+          status: "done",
+          customQuestions: Array.from(
+            new Set((e.customSurfacing ?? []).map((c) => c.question)),
+          ),
+          customCells: e.customSurfacing ?? [],
+          customPending: [],
+        },
+        personas,
+        synthesis: {
+          tokens: "",
+          report: e.synthesis,
+          error: e.synthesisError,
+        },
+        totalMs: e.totalMs,
+        totalCostUsd: e.totalCostUsd,
+        isStreaming: false,
+      };
+    }
+
+    case "ATTACH_FIX":
+      return {
+        ...state,
+        fixes: { ...state.fixes, [action.leverIndex]: action.fix },
       };
 
     case "CANCEL": {
@@ -144,6 +259,7 @@ function reducer(state: StreamState, action: Action): StreamState {
         personas,
         surfacing: { ...state.surfacing, pendingCells: [] },
         isStreaming: false,
+        cancelled: true,
       };
     }
 
@@ -263,8 +379,49 @@ function reducer(state: StreamState, action: Action): StreamState {
     case "STREAM_ERROR":
       return {
         ...state,
-        error: `${action.code}: ${action.message}`,
+        error: action.message,
         isStreaming: false,
+      };
+
+    case "CUSTOM_SURFACING_START": {
+      const q = action.question;
+      const alreadyTracked = state.surfacing.customQuestions.includes(q);
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          customQuestions: alreadyTracked
+            ? state.surfacing.customQuestions
+            : [...state.surfacing.customQuestions, q],
+          // Drop any prior cells for this question so a re-run replaces them cleanly.
+          customCells: state.surfacing.customCells.filter((c) => c.question !== q),
+          customPending: state.surfacing.customPending.includes(q)
+            ? state.surfacing.customPending
+            : [...state.surfacing.customPending, q],
+        },
+      };
+    }
+
+    case "CUSTOM_SURFACING_RESULT":
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          customCells: [
+            ...state.surfacing.customCells.filter((c) => c.question !== action.question),
+            ...action.results,
+          ],
+          customPending: state.surfacing.customPending.filter((q) => q !== action.question),
+        },
+      };
+
+    case "CUSTOM_SURFACING_ERROR":
+      return {
+        ...state,
+        surfacing: {
+          ...state.surfacing,
+          customPending: state.surfacing.customPending.filter((q) => q !== action.question),
+        },
       };
 
     default:
@@ -281,6 +438,8 @@ function sseEventToAction(evt: SseEvent): Action | null {
       return { type: "PHASE", phase: evt.data.phase };
     case "scrape-progress":
       return { type: "SCRAPE_PROGRESS", stage: evt.data.stage, message: evt.data.message };
+    case "product-meta":
+      return { type: "PRODUCT_META", meta: evt.data };
     case "surfacing-questions":
       return { type: "SURFACING_QUESTIONS", questions: evt.data.questions };
     case "surfacing-cell-start":
@@ -338,11 +497,57 @@ export interface UsePersonaStreamReturn {
   start: (productUrl: string) => Promise<void>;
   cancel: () => void;
   reset: () => void;
+  loadFromHistory: (entry: HistoryEntry) => void;
+  saveFix: (leverIndex: number, fix: GeneratedFix) => void;
+  runCustomQuestion: (question: string) => Promise<void>;
+}
+
+function snapshotPersonas(
+  personas: Record<string, PersonaState>,
+): Record<string, PersonaSnapshot> {
+  const out: Record<string, PersonaSnapshot> = {};
+  for (const [id, p] of Object.entries(personas)) {
+    if (p.status === "done") {
+      out[id] = { status: "done", verdict: p.verdict };
+    } else if (p.status === "error") {
+      out[id] = { status: "error", error: p.error };
+    }
+    // skip pending/streaming — only persist terminal states
+  }
+  return out;
+}
+
+function persistFromState(state: StreamState, totalMs: number, totalCostUsd: number): void {
+  if (!state.analysisId || !state.productUrl || !state.productMeta) return;
+  if (!state.synthesis.report) return; // only persist when the synthesis report exists
+  const entry: HistoryEntry = {
+    id: state.analysisId,
+    asin: state.productMeta.asin,
+    productUrl: state.productUrl,
+    productMeta: state.productMeta,
+    createdAt: Date.now(),
+    totalMs,
+    totalCostUsd,
+    surfacing: {
+      questions: state.surfacing.questions,
+      cells: state.surfacing.cells,
+    },
+    personas: snapshotPersonas(state.personas),
+    synthesis: state.synthesis.report,
+    synthesisError: state.synthesis.error,
+    fixes: state.fixes,
+    customSurfacing: state.surfacing.customCells,
+  };
+  saveAnalysis(entry);
 }
 
 export function usePersonaStream(): UsePersonaStreamReturn {
   const [state, dispatch] = useReducer(reducer, initialState);
   const abortRef = useRef<AbortController | null>(null);
+  // Live mirror of state so the SSE event handler can persist using the latest snapshot
+  // without recreating callbacks on every re-render.
+  const stateRef = useRef<StreamState>(state);
+  stateRef.current = state;
 
   const cancel = useCallback(() => {
     if (abortRef.current) {
@@ -360,6 +565,84 @@ export function usePersonaStream(): UsePersonaStreamReturn {
     dispatch({ type: "RESET" });
   }, []);
 
+  const loadFromHistory = useCallback((entry: HistoryEntry) => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    dispatch({ type: "LOAD_HISTORY", entry });
+  }, []);
+
+  const saveFix = useCallback((leverIndex: number, fix: GeneratedFix) => {
+    const id = stateRef.current.analysisId;
+    dispatch({ type: "ATTACH_FIX", leverIndex, fix });
+    if (id) attachFix(id, leverIndex, fix);
+  }, []);
+
+  const runCustomQuestion = useCallback(async (question: string): Promise<void> => {
+    const trimmed = question.trim();
+    if (trimmed.length < 5) {
+      toast.error("Question must be at least 5 characters.");
+      return;
+    }
+    if (trimmed.length > 300) {
+      toast.error("Question must be 300 characters or fewer.");
+      return;
+    }
+    const productUrl = stateRef.current.productUrl;
+    if (!productUrl) {
+      toast.error("No product loaded. Run an analysis first.");
+      return;
+    }
+
+    dispatch({ type: "CUSTOM_SURFACING_START", question: trimmed });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/surface-question`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productUrl, question: trimmed }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        let message = text || `HTTP ${response.status}`;
+        try {
+          const parsed = JSON.parse(text) as { error?: { message?: string } };
+          if (parsed.error?.message) message = parsed.error.message;
+        } catch {
+          // raw text fallback
+        }
+        toast.error(`Custom question failed: ${message.slice(0, 200)}`);
+        dispatch({
+          type: "CUSTOM_SURFACING_ERROR",
+          question: trimmed,
+          message: message.slice(0, 200),
+        });
+        return;
+      }
+
+      const json = (await response.json()) as { results: SurfaceResult[] };
+      const results = json.results ?? [];
+      dispatch({
+        type: "CUSTOM_SURFACING_RESULT",
+        question: trimmed,
+        results,
+      });
+
+      const id = stateRef.current.analysisId;
+      if (id) attachCustomSurfacing(id, results);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`Custom question failed: ${message.slice(0, 200)}`);
+      dispatch({
+        type: "CUSTOM_SURFACING_ERROR",
+        question: trimmed,
+        message,
+      });
+    }
+  }, []);
+
   const start = useCallback(async (productUrl: string): Promise<void> => {
     if (abortRef.current) {
       abortRef.current.abort();
@@ -368,7 +651,8 @@ export function usePersonaStream(): UsePersonaStreamReturn {
 
     const controller = new AbortController();
     abortRef.current = controller;
-    dispatch({ type: "START" });
+    const analysisId = newAnalysisId();
+    dispatch({ type: "START", analysisId, productUrl });
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/stream-personas`, {
@@ -432,6 +716,20 @@ export function usePersonaStream(): UsePersonaStreamReturn {
 
           const action = sseEventToAction(evt);
           if (action) dispatch(action);
+
+          // Persist to history at two points:
+          //  1) synthesis-complete — the report is rendered and the user can interact.
+          //     Saving here means generating fixes works even if the stream cuts off before `done`.
+          //  2) done — overwrite with final timing/cost data.
+          // We use stateRef + a microtask so the dispatch above has applied first.
+          if (evt.event === "synthesis-complete") {
+            queueMicrotask(() => persistFromState(stateRef.current, 0, 0));
+          } else if (evt.event === "done") {
+            const { totalMs, totalCostUsd } = evt.data;
+            queueMicrotask(() =>
+              persistFromState(stateRef.current, totalMs, totalCostUsd),
+            );
+          }
         }
       }
     } catch (err) {
@@ -446,5 +744,13 @@ export function usePersonaStream(): UsePersonaStreamReturn {
     }
   }, []);
 
-  return { state, start, cancel, reset };
+  return {
+    state,
+    start,
+    cancel,
+    reset,
+    loadFromHistory,
+    saveFix,
+    runCustomQuestion,
+  };
 }

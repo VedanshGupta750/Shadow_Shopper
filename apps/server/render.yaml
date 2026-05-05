@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: shadow-shopper-api
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: AZURE_ENDPOINT
+        sync: false
+      - key: AZURE_API_KEY
+        sync: false
+      - key: AZURE_API_VERSION
+        sync: false
+      - key: DEPLOYMENT_NAME
+        sync: false
+      - key: SCRAPERAPI_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: NODE_ENV
+        value: production

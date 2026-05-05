@@ -37,6 +37,28 @@ function isRetryable(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Pino's default error serializer dumps every enumerable property on an
+ * AxiosError — config, request, response, agent, sockets — producing hundreds
+ * of lines of internals per failure. This trims to what's actionable.
+ */
+function summarizeError(error: unknown): Record<string, unknown> {
+  if (axios.isAxiosError(error)) {
+    return {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+      url: error.config?.url,
+      method: error.config?.method,
+    };
+  }
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message };
+  }
+  return { value: String(error) };
+}
+
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   return pRetry(
     async () => {
@@ -214,7 +236,12 @@ export async function getProduct(asin: string): Promise<AmazonProduct> {
     return product;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    logger.error({ asin, err: error }, "scraper.getProduct: failed");
+    logger.error({ asin, err: summarizeError(error) }, "scraper.getProduct: failed");
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      throw new UpstreamError(
+        `Couldn't load that Amazon listing (ASIN ${asin}). The product may be unavailable, region-locked, or not indexed by ScraperAPI. Try a different URL.`,
+      );
+    }
     throw new UpstreamError(`ScraperAPI product fetch failed for ASIN ${asin}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -253,7 +280,7 @@ export async function getReviews(asin: string, max: number = 10): Promise<Amazon
     return sliced;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    logger.error({ asin, err: error }, "scraper.getReviews: failed");
+    logger.error({ asin, err: summarizeError(error) }, "scraper.getReviews: failed");
     throw new UpstreamError(`ScraperAPI review fetch failed for ASIN ${asin}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -285,7 +312,7 @@ export async function searchAmazon(query: string, resultLimit: number = 10): Pro
     return items;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    logger.error({ query: trimmed, err: error }, "scraper.searchAmazon: failed");
+    logger.error({ query: trimmed, err: summarizeError(error) }, "scraper.searchAmazon: failed");
     throw new UpstreamError(`ScraperAPI search failed for query "${trimmed}": ${error instanceof Error ? error.message : String(error)}`);
   }
 }
