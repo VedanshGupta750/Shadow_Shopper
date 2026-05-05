@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Request, Response, NextFunction } from "express";
-import { extractAsin, getProductCached, searchAmazonCached } from "../scraper/index.js";
+import { parseAmazonUrl, getProductCached, searchAmazonCached } from "../scraper/index.js";
 import { simulateRufus } from "./rufus.js";
 import { simulateChatGptShopping } from "./chatgpt.js";
 import { scoreSurfacing } from "./score.js";
@@ -72,23 +72,29 @@ export async function surfaceQuestionHandler(
   }
   const { productUrl, question } = parsed.data;
 
-  const asin = extractAsin(productUrl);
-  if (!asin) {
-    throw new ValidationError("Could not extract ASIN from productUrl");
+  const url = parseAmazonUrl(productUrl);
+  if (!url) {
+    throw new ValidationError(
+      "Could not parse productUrl. Pass an Amazon product URL (any TLD: .com, .in, .co.uk, .de, .ca, etc.) with /dp/<ASIN> in the path.",
+    );
   }
+  const { asin, marketplace } = url;
 
-  logger.info({ requestId, asin, question: question.slice(0, 80) }, "surfaceQuestion: enter");
+  logger.info(
+    { requestId, asin, ...marketplace, question: question.slice(0, 80) },
+    "surfaceQuestion: enter",
+  );
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HANDLER_TIMEOUT_MS);
   req.on("close", () => controller.abort());
 
   try {
-    const product = await getProductCached(asin);
+    const product = await getProductCached(asin, marketplace);
     let competitors: Awaited<ReturnType<typeof searchAmazonCached>> = [];
     try {
       const query = product.name.split(" ").slice(0, 4).join(" ");
-      competitors = await searchAmazonCached(query, 8);
+      competitors = await searchAmazonCached(query, 8, marketplace);
     } catch {
       logger.warn({ requestId, asin }, "surfaceQuestion: competitor search failed, continuing");
     }

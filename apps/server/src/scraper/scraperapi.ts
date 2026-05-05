@@ -5,6 +5,7 @@ import { z } from "zod";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { ValidationError, UpstreamError } from "../errors.js";
+import { DEFAULT_MARKETPLACE, type Marketplace } from "./url.js";
 import type { AmazonProduct, AmazonReview, AmazonSearchResult } from "../types/amazon.js";
 
 const ASIN_RE = /^[A-Z0-9]{10}$/;
@@ -17,8 +18,6 @@ function createClient(): AxiosInstance {
     timeout: 70_000,
     params: {
       api_key: env.SCRAPERAPI_KEY,
-      country_code: "us",
-      tld: "com",
     },
   });
 }
@@ -214,17 +213,22 @@ function mapSearchResult(raw: z.infer<typeof rawSearchItemSchema>): AmazonSearch
 // -- Public API --
 
 /** Fetch a product's detail page by ASIN via ScraperAPI structured endpoint. */
-export async function getProduct(asin: string): Promise<AmazonProduct> {
+export async function getProduct(
+  asin: string,
+  marketplace: Marketplace = DEFAULT_MARKETPLACE,
+): Promise<AmazonProduct> {
   if (!ASIN_RE.test(asin)) {
     throw new ValidationError(`Invalid ASIN format: "${asin}". Must be 10 alphanumeric characters.`);
   }
 
-  logger.debug({ asin }, "scraper.getProduct: start");
+  logger.debug({ asin, ...marketplace }, "scraper.getProduct: start");
 
   try {
     const data: unknown = await limit(() =>
       withRetry(async () => {
-        const res = await getClient().get("/product", { params: { asin } });
+        const res = await getClient().get("/product", {
+          params: { asin, country_code: marketplace.country, tld: marketplace.tld },
+        });
         return res.data as unknown;
       }),
     );
@@ -232,27 +236,34 @@ export async function getProduct(asin: string): Promise<AmazonProduct> {
     const parsed = rawProductSchema.parse(data);
     const product = mapProduct(asin, parsed);
 
-    logger.info({ asin, name: product.name, reviews: product.total_reviews }, "scraper.getProduct: success");
+    logger.info(
+      { asin, ...marketplace, name: product.name, reviews: product.total_reviews },
+      "scraper.getProduct: success",
+    );
     return product;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    logger.error({ asin, err: summarizeError(error) }, "scraper.getProduct: failed");
+    logger.error({ asin, ...marketplace, err: summarizeError(error) }, "scraper.getProduct: failed");
     if (axios.isAxiosError(error) && error.response?.status === 404) {
       throw new UpstreamError(
-        `Couldn't load that Amazon listing (ASIN ${asin}). The product may be unavailable, region-locked, or not indexed by ScraperAPI. Try a different URL.`,
+        `Couldn't load that Amazon listing (ASIN ${asin} on amazon.${marketplace.tld}). The product may be unavailable, region-locked, or not indexed by ScraperAPI. Try a different URL.`,
       );
     }
-    throw new UpstreamError(`ScraperAPI product fetch failed for ASIN ${asin}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new UpstreamError(`ScraperAPI product fetch failed for ASIN ${asin} on amazon.${marketplace.tld}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 /** Fetch customer reviews for an ASIN. Returns up to `max` reviews. */
-export async function getReviews(asin: string, max: number = 10): Promise<AmazonReview[]> {
+export async function getReviews(
+  asin: string,
+  max: number = 10,
+  marketplace: Marketplace = DEFAULT_MARKETPLACE,
+): Promise<AmazonReview[]> {
   if (!ASIN_RE.test(asin)) {
     throw new ValidationError(`Invalid ASIN format: "${asin}". Must be 10 alphanumeric characters.`);
   }
 
-  logger.debug({ asin, max }, "scraper.getReviews: start");
+  logger.debug({ asin, max, ...marketplace }, "scraper.getReviews: start");
 
   try {
     const pagesNeeded = Math.ceil(max / 10);
@@ -262,7 +273,9 @@ export async function getReviews(asin: string, max: number = 10): Promise<Amazon
       pages.map((page) =>
         limit(() =>
           withRetry(async () => {
-            const res = await getClient().get("/review", { params: { asin, page } });
+            const res = await getClient().get("/review", {
+              params: { asin, page, country_code: marketplace.country, tld: marketplace.tld },
+            });
             return res.data as unknown;
           }),
         ),
@@ -276,28 +289,37 @@ export async function getReviews(asin: string, max: number = 10): Promise<Amazon
     }
 
     const sliced = reviews.slice(0, max);
-    logger.info({ asin, fetched: sliced.length, pagesQueried: pagesNeeded }, "scraper.getReviews: success");
+    logger.info(
+      { asin, ...marketplace, fetched: sliced.length, pagesQueried: pagesNeeded },
+      "scraper.getReviews: success",
+    );
     return sliced;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    logger.error({ asin, err: summarizeError(error) }, "scraper.getReviews: failed");
-    throw new UpstreamError(`ScraperAPI review fetch failed for ASIN ${asin}: ${error instanceof Error ? error.message : String(error)}`);
+    logger.error({ asin, ...marketplace, err: summarizeError(error) }, "scraper.getReviews: failed");
+    throw new UpstreamError(`ScraperAPI review fetch failed for ASIN ${asin} on amazon.${marketplace.tld}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 /** Search Amazon for products matching a query. Returns up to `limit` results. */
-export async function searchAmazon(query: string, resultLimit: number = 10): Promise<AmazonSearchResult[]> {
+export async function searchAmazon(
+  query: string,
+  resultLimit: number = 10,
+  marketplace: Marketplace = DEFAULT_MARKETPLACE,
+): Promise<AmazonSearchResult[]> {
   const trimmed = query.trim();
   if (trimmed.length === 0) {
     throw new ValidationError("Search query must be non-empty.");
   }
 
-  logger.debug({ query: trimmed, resultLimit }, "scraper.searchAmazon: start");
+  logger.debug({ query: trimmed, resultLimit, ...marketplace }, "scraper.searchAmazon: start");
 
   try {
     const data: unknown = await limit(() =>
       withRetry(async () => {
-        const res = await getClient().get("/search", { params: { query: trimmed } });
+        const res = await getClient().get("/search", {
+          params: { query: trimmed, country_code: marketplace.country, tld: marketplace.tld },
+        });
         return res.data as unknown;
       }),
     );
@@ -308,11 +330,11 @@ export async function searchAmazon(query: string, resultLimit: number = 10): Pro
       .slice(0, resultLimit)
       .map(mapSearchResult);
 
-    logger.info({ query: trimmed, count: items.length }, "scraper.searchAmazon: success");
+    logger.info({ query: trimmed, ...marketplace, count: items.length }, "scraper.searchAmazon: success");
     return items;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    logger.error({ query: trimmed, err: summarizeError(error) }, "scraper.searchAmazon: failed");
-    throw new UpstreamError(`ScraperAPI search failed for query "${trimmed}": ${error instanceof Error ? error.message : String(error)}`);
+    logger.error({ query: trimmed, ...marketplace, err: summarizeError(error) }, "scraper.searchAmazon: failed");
+    throw new UpstreamError(`ScraperAPI search failed for query "${trimmed}" on amazon.${marketplace.tld}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

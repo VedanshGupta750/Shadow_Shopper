@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Request, Response, NextFunction } from "express";
-import { extractAsin, getProductCached, getReviewsCached, searchAmazonCached } from "../scraper/index.js";
+import { parseAmazonUrl, getProductCached, getReviewsCached, searchAmazonCached } from "../scraper/index.js";
 import { buildBrief } from "../personas/brief.js";
 import { PERSONAS } from "../personas/index.js";
 import { streamPersona } from "../llm/callPersona.js";
@@ -86,12 +86,18 @@ export async function streamPersonasHandler(
   }
   const { productUrl } = parseResult.data;
 
-  const asin = extractAsin(productUrl);
-  if (!asin) {
-    throw new ValidationError("Could not extract ASIN from productUrl");
+  const parsed = parseAmazonUrl(productUrl);
+  if (!parsed) {
+    throw new ValidationError(
+      "Could not parse productUrl. Pass an Amazon product URL (any TLD: .com, .in, .co.uk, .de, .ca, etc.) with /dp/<ASIN> in the path.",
+    );
   }
+  const { asin, marketplace } = parsed;
 
-  logger.info({ event: "demo_started", requestId, asin }, "demo started");
+  logger.info(
+    { event: "demo_started", requestId, asin, ...marketplace },
+    "demo started",
+  );
 
   const writer = new SseWriter(res);
   const controller = new AbortController();
@@ -135,8 +141,11 @@ export async function streamPersonasHandler(
     const scrapingStart = Date.now();
     writer.send("phase", { phase: "scraping" });
 
-    writer.send("scrape-progress", { stage: "product", message: `Fetching product ${asin}` });
-    const product = await getProductCached(asin);
+    writer.send("scrape-progress", {
+      stage: "product",
+      message: `Fetching ${asin} from amazon.${marketplace.tld}`,
+    });
+    const product = await getProductCached(asin, marketplace);
     writer.send("scrape-progress", { stage: "product", message: `Got: ${product.name.slice(0, 80)}` });
     writer.send("product-meta", {
       asin,
@@ -151,7 +160,7 @@ export async function streamPersonasHandler(
     let reviews: AmazonReview[] = [];
     writer.send("scrape-progress", { stage: "reviews", message: "Fetching reviews" });
     try {
-      reviews = await getReviewsCached(asin, 100);
+      reviews = await getReviewsCached(asin, 100, marketplace);
       writer.send("scrape-progress", { stage: "reviews", message: `Got ${reviews.length} reviews` });
       if (reviews.length === 0) {
         logger.warn({ requestId, asin }, "sse.handler: 0 reviews returned");
@@ -165,7 +174,7 @@ export async function streamPersonasHandler(
     writer.send("scrape-progress", { stage: "competitors", message: "Searching competitors" });
     try {
       const query = product.name.split(" ").slice(0, 4).join(" ");
-      competitors = await searchAmazonCached(query, 8);
+      competitors = await searchAmazonCached(query, 8, marketplace);
       writer.send("scrape-progress", { stage: "competitors", message: `Got ${competitors.length} competitors` });
       if (competitors.length === 0) {
         logger.warn({ requestId, asin }, "sse.handler: 0 competitors returned");
