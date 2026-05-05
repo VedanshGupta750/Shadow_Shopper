@@ -1,4 +1,4 @@
-import { useCallback, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import { toast } from "sonner";
 import { API_BASE_URL } from "../lib/api";
 import { PERSONA_METADATA } from "../lib/personaMetadata";
@@ -544,10 +544,22 @@ function persistFromState(state: StreamState, totalMs: number, totalCostUsd: num
 export function usePersonaStream(): UsePersonaStreamReturn {
   const [state, dispatch] = useReducer(reducer, initialState);
   const abortRef = useRef<AbortController | null>(null);
-  // Live mirror of state so the SSE event handler can persist using the latest snapshot
-  // without recreating callbacks on every re-render.
+  // Live mirror of state so callbacks (saveFix, runCustomQuestion) can read the latest
+  // analysisId without being recreated on every re-render.
   const stateRef = useRef<StreamState>(state);
   stateRef.current = state;
+
+  // Persist to history whenever a live run reaches synthesis-complete or done. Runs as an
+  // effect (NOT in the SSE handler via queueMicrotask) because effects fire after React
+  // commits the dispatched state — at queueMicrotask time the new state isn't visible yet.
+  // saveAnalysis upserts by id, so the synthesis-complete save and the done save (with real
+  // totalMs/totalCostUsd) are idempotent for the same analysisId.
+  useEffect(() => {
+    if (state.loadedFromHistory) return;
+    if (!state.analysisId || !state.productUrl || !state.productMeta) return;
+    if (!state.synthesis.report) return;
+    persistFromState(state, state.totalMs, state.totalCostUsd);
+  }, [state]);
 
   const cancel = useCallback(() => {
     if (abortRef.current) {
@@ -717,19 +729,9 @@ export function usePersonaStream(): UsePersonaStreamReturn {
           const action = sseEventToAction(evt);
           if (action) dispatch(action);
 
-          // Persist to history at two points:
-          //  1) synthesis-complete — the report is rendered and the user can interact.
-          //     Saving here means generating fixes works even if the stream cuts off before `done`.
-          //  2) done — overwrite with final timing/cost data.
-          // We use stateRef + a microtask so the dispatch above has applied first.
-          if (evt.event === "synthesis-complete") {
-            queueMicrotask(() => persistFromState(stateRef.current, 0, 0));
-          } else if (evt.event === "done") {
-            const { totalMs, totalCostUsd } = evt.data;
-            queueMicrotask(() =>
-              persistFromState(stateRef.current, totalMs, totalCostUsd),
-            );
-          }
+          // Persistence is handled by a useEffect below — it watches state.synthesis.report
+          // and state.phase, so it fires after React commits each dispatch. This avoids the
+          // stale-stateRef bug where queueMicrotask runs before the new state is committed.
         }
       }
     } catch (err) {
