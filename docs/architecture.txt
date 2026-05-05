@@ -1,0 +1,49 @@
+Shadow Shopper — system architecture (ASCII fallback)
+
+  User
+   │
+   ▼
+  Frontend (Vercel)
+  Vite + React 19 + Tailwind + shadcn/ui
+   │   POST /api/stream-personas      (SSE)
+   │   POST /api/generate-fix         (JSON)
+   │   POST /api/surface-question     (JSON)
+   ▼
+  Backend (Render Free + UptimeRobot keep-warm)
+  Node 20 + Express + TypeScript
+   │
+   ├──────────────────────┬──────────────────────┐
+   ▼                      ▼                      ▼
+  Scraper           AI Surfacing            Personas
+  ScraperAPI         GPT-4o ×10             GPT-4o ×10
+  (product,         (5 questions ×          (10 buyer
+  reviews,           Rufus + ChatGPT          personas
+  competitors,       simulators)              streaming
+  cached 7d)                                  in parallel)
+                                                   │
+                                                   ▼
+                                              Synthesizer
+                                              GPT-4o
+                                              (top 3 friction +
+                                               top 3 fixes +
+                                               revenue at risk)
+                                                   │
+                                                   ▼
+                                       Generate Fix (on demand)
+                                       GPT-4o per lever click
+                                       (bullets + A+ + image brief)
+
+
+Storage:
+  - Filesystem cache for ScraperAPI responses (SHA-1 keyed, 7-day TTL)
+  - localStorage on client for analysis history (cap 20 entries)
+  - No database — server is stateless
+
+Streaming:
+  - SSE from /api/stream-personas with heartbeats every 15s
+  - Per-persona token streams + per-cell surfacing events + synthesis-token + done
+
+Auth & rate limits:
+  - No user auth (single-tenant demo)
+  - express-rate-limit at 10 req/min per IP on POST endpoints
+  - Optional /metrics endpoint gated by X-Admin-Secret header
