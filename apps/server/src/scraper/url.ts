@@ -97,3 +97,86 @@ export function parseAmazonUrl(
 export function extractAsin(url: string): string | null {
   return parseAmazonUrl(url)?.asin ?? null;
 }
+
+/**
+ * Cross-platform product URL parser. Returns a discriminated union:
+ *   { platform: "amazon", asin, marketplace, originalUrl }
+ *   { platform: "generic", productId, hostname, originalUrl }
+ *
+ * "amazon" is the rich-data path — uses ScraperAPI's structured Amazon endpoint
+ * for product, reviews, and competitor search. Includes the marketplace.
+ *
+ * "generic" is the degraded-but-honest path. Any other parseable URL is accepted;
+ * the scraper falls back to schema.org/Product JSON-LD and OpenGraph meta tags.
+ * No reviews, no competitors, no surfacing audit. The frontend shows a banner
+ * telling the user the analysis is Amazon-tuned and may not fully apply.
+ *
+ * The `productId` for generic URLs is a SHA1-prefix derived from the URL itself —
+ * we don't try to detect Flipkart's FSN, Meesho's numeric ID, etc. specifically,
+ * because doing so would be the kind of per-platform hardcoding we want to avoid.
+ * Cache keys, request IDs, and history entries use this synthetic ID.
+ */
+export type ParsedProductUrl =
+  | {
+      platform: "amazon";
+      asin: string;
+      marketplace: Marketplace;
+      hostname: string;
+      originalUrl: string;
+    }
+  | {
+      platform: "generic";
+      productId: string;
+      hostname: string;
+      originalUrl: string;
+    };
+
+/** Synthetic 12-char product ID derived from the URL (for cache keys and display). */
+function syntheticIdFromUrl(url: string): string {
+  let hash = 0;
+  for (let i = 0; i < url.length; i++) {
+    hash = (hash << 5) - hash + url.charCodeAt(i);
+    hash |= 0;
+  }
+  return `gen-${Math.abs(hash).toString(36).padStart(8, "0").slice(0, 8)}`;
+}
+
+export function parseProductUrl(input: string): ParsedProductUrl | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // First try Amazon — keeps the rich-data path for any recognized Amazon TLD.
+  const amazon = parseAmazonUrl(trimmed);
+  if (amazon) {
+    let hostname = "";
+    try {
+      hostname = normalizeHostname(new URL(trimmed).hostname);
+    } catch {
+      hostname = `amazon.${amazon.marketplace.tld}`;
+    }
+    return {
+      platform: "amazon",
+      asin: amazon.asin,
+      marketplace: amazon.marketplace,
+      hostname,
+      originalUrl: trimmed,
+    };
+  }
+
+  // Generic path — anything else with a parseable URL and a hostname.
+  let hostname: string;
+  try {
+    const u = new URL(trimmed);
+    if (!u.hostname) return null;
+    hostname = normalizeHostname(u.hostname);
+  } catch {
+    return null;
+  }
+
+  return {
+    platform: "generic",
+    productId: syntheticIdFromUrl(trimmed),
+    hostname,
+    originalUrl: trimmed,
+  };
+}

@@ -133,11 +133,33 @@ function App() {
           </div>
         )}
 
-        <SurfacingGrid
-          state={state.surfacing}
-          productLoaded={!!state.productMeta}
-          onSubmitCustom={runCustomQuestion}
-        />
+        {state.productMeta && state.productMeta.platform !== "amazon" && (
+          <div
+            role="status"
+            className="flex flex-col gap-1 rounded-md border border-warn/40 bg-warn/10 px-4 py-3 text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <span aria-hidden className="h-2 w-2 rounded-full bg-warn" />
+              <span className="font-display text-sm font-medium text-text">
+                Running on {state.productMeta.hostname} (non-Amazon)
+              </span>
+            </div>
+            <p className="leading-relaxed text-muted">
+              The personas, conversion levers, and Generate-Fix copy are tuned
+              for Amazon Seller Central. Treat results as directional. The AI
+              Surfacing audit (Rufus + ChatGPT shopping mode) is skipped — those
+              are Amazon-only surfaces.
+            </p>
+          </div>
+        )}
+
+        {(!state.productMeta || state.productMeta.platform === "amazon") && (
+          <SurfacingGrid
+            state={state.surfacing}
+            productLoaded={!!state.productMeta}
+            onSubmitCustom={runCustomQuestion}
+          />
+        )}
 
         <section aria-labelledby="personas-heading" className="flex flex-col gap-3">
           <h2

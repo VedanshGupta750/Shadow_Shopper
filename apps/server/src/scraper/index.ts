@@ -3,8 +3,8 @@ import { getProduct, getReviews, searchAmazon } from "./scraperapi.js";
 import { DEFAULT_MARKETPLACE, type Marketplace } from "./url.js";
 import type { AmazonProduct, AmazonReview, AmazonSearchResult } from "../types/amazon.js";
 
-export { extractAsin, parseAmazonUrl, DEFAULT_MARKETPLACE } from "./url.js";
-export type { Marketplace } from "./url.js";
+export { extractAsin, parseAmazonUrl, parseProductUrl, DEFAULT_MARKETPLACE } from "./url.js";
+export type { Marketplace, ParsedProductUrl } from "./url.js";
 export { clearCache, getCacheStats } from "./cache.js";
 export { getProduct, getReviews, searchAmazon };
 

@@ -64,6 +64,10 @@ export interface ProductMeta {
   bullets: string[];
   rating: number | null;
   totalReviews: number | null;
+  /** "amazon" runs the full pipeline. "generic" skips surfacing and disclaims fixes. */
+  platform: "amazon" | "generic";
+  /** Hostname for display (e.g. "amazon.in", "flipkart.com"). */
+  hostname: string;
 }
 
 export type SseEvent =

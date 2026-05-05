@@ -1,6 +1,13 @@
 import { z } from "zod";
 import type { Request, Response, NextFunction } from "express";
-import { parseAmazonUrl, getProductCached, getReviewsCached, searchAmazonCached } from "../scraper/index.js";
+import {
+  parseProductUrl,
+  getProductCached,
+  getReviewsCached,
+  searchAmazonCached,
+} from "../scraper/index.js";
+import { scrapeGenericProduct } from "../scraper/generic.js";
+import { cached } from "../scraper/cache.js";
 import { buildBrief } from "../personas/brief.js";
 import { PERSONAS } from "../personas/index.js";
 import { streamPersona } from "../llm/callPersona.js";
@@ -86,16 +93,24 @@ export async function streamPersonasHandler(
   }
   const { productUrl } = parseResult.data;
 
-  const parsed = parseAmazonUrl(productUrl);
+  const parsed = parseProductUrl(productUrl);
   if (!parsed) {
     throw new ValidationError(
-      "Could not parse productUrl. Pass an Amazon product URL (any TLD: .com, .in, .co.uk, .de, .ca, etc.) with /dp/<ASIN> in the path.",
+      "Could not parse productUrl. Pass a full product URL from any e-commerce site (Amazon any TLD, Flipkart, Meesho, Myntra, AJIO, Nykaa, etc.).",
     );
   }
-  const { asin, marketplace } = parsed;
+  // Synthetic ASIN for non-Amazon — used as the cache key, request id, and history key.
+  const asin = parsed.platform === "amazon" ? parsed.asin : parsed.productId;
 
   logger.info(
-    { event: "demo_started", requestId, asin, ...marketplace },
+    {
+      event: "demo_started",
+      requestId,
+      asin,
+      platform: parsed.platform,
+      hostname: parsed.hostname,
+      ...(parsed.platform === "amazon" ? parsed.marketplace : {}),
+    },
     "demo started",
   );
 
@@ -143,9 +158,16 @@ export async function streamPersonasHandler(
 
     writer.send("scrape-progress", {
       stage: "product",
-      message: `Fetching ${asin} from amazon.${marketplace.tld}`,
+      message: `Fetching ${parsed.hostname}…`,
     });
-    const product = await getProductCached(asin, marketplace);
+    const product =
+      parsed.platform === "amazon"
+        ? await getProductCached(parsed.asin, parsed.marketplace)
+        : await cached(
+            `generic:${parsed.productId}`,
+            7 * 24 * 60 * 60 * 1000,
+            () => scrapeGenericProduct(parsed.originalUrl, parsed.productId),
+          );
     writer.send("scrape-progress", { stage: "product", message: `Got: ${product.name.slice(0, 80)}` });
     writer.send("product-meta", {
       asin,
@@ -155,34 +177,53 @@ export async function streamPersonasHandler(
       bullets: product.bullets.slice(0, 8),
       rating: product.rating ?? null,
       totalReviews: product.total_reviews ?? null,
+      platform: parsed.platform,
+      hostname: parsed.hostname,
     });
 
     let reviews: AmazonReview[] = [];
-    writer.send("scrape-progress", { stage: "reviews", message: "Fetching reviews" });
-    try {
-      reviews = await getReviewsCached(asin, 100, marketplace);
-      writer.send("scrape-progress", { stage: "reviews", message: `Got ${reviews.length} reviews` });
-      if (reviews.length === 0) {
-        logger.warn({ requestId, asin }, "sse.handler: 0 reviews returned");
-      }
-    } catch {
-      logger.warn({ requestId, asin }, "sse.handler: reviews fetch failed");
-      writer.send("scrape-progress", { stage: "reviews", message: "Reviews unavailable, continuing" });
-    }
-
     let competitors: AmazonSearchResult[] = [];
-    writer.send("scrape-progress", { stage: "competitors", message: "Searching competitors" });
-    try {
-      const query = product.name.split(" ").slice(0, 4).join(" ");
-      competitors = await searchAmazonCached(query, 8, marketplace);
-      writer.send("scrape-progress", { stage: "competitors", message: `Got ${competitors.length} competitors` });
-      if (competitors.length === 0) {
-        logger.warn({ requestId, asin }, "sse.handler: 0 competitors returned");
-        writer.send("scrape-progress", { stage: "competitors", message: "No competitors found" });
+
+    if (parsed.platform === "amazon") {
+      writer.send("scrape-progress", { stage: "reviews", message: "Fetching reviews" });
+      try {
+        reviews = await getReviewsCached(parsed.asin, 100, parsed.marketplace);
+        writer.send("scrape-progress", { stage: "reviews", message: `Got ${reviews.length} reviews` });
+        if (reviews.length === 0) {
+          logger.warn({ requestId, asin }, "sse.handler: 0 reviews returned");
+        }
+      } catch {
+        logger.warn({ requestId, asin }, "sse.handler: reviews fetch failed");
+        writer.send("scrape-progress", { stage: "reviews", message: "Reviews unavailable, continuing" });
       }
-    } catch {
-      logger.warn({ requestId, asin }, "sse.handler: competitor search failed");
-      writer.send("scrape-progress", { stage: "competitors", message: "Competitors unavailable, continuing" });
+
+      writer.send("scrape-progress", { stage: "competitors", message: "Searching competitors" });
+      try {
+        const query = product.name.split(" ").slice(0, 4).join(" ");
+        competitors = await searchAmazonCached(query, 8, parsed.marketplace);
+        writer.send("scrape-progress", {
+          stage: "competitors",
+          message: `Got ${competitors.length} competitors`,
+        });
+        if (competitors.length === 0) {
+          logger.warn({ requestId, asin }, "sse.handler: 0 competitors returned");
+          writer.send("scrape-progress", { stage: "competitors", message: "No competitors found" });
+        }
+      } catch {
+        logger.warn({ requestId, asin }, "sse.handler: competitor search failed");
+        writer.send("scrape-progress", { stage: "competitors", message: "Competitors unavailable, continuing" });
+      }
+    } else {
+      // Generic platform: no review-fetch API, no per-platform competitor search.
+      // The personas + synthesizer already handle empty reviews/competitors gracefully.
+      writer.send("scrape-progress", {
+        stage: "reviews",
+        message: `Reviews unavailable on ${parsed.hostname} (Amazon-only feature)`,
+      });
+      writer.send("scrape-progress", {
+        stage: "competitors",
+        message: `Competitor search unavailable on ${parsed.hostname} (Amazon-only feature)`,
+      });
     }
 
     logger.info(
@@ -205,26 +246,37 @@ export async function streamPersonasHandler(
     }
 
     // ===== SURFACING =====
+    // Rufus + ChatGPT shopping mode are Amazon-specific surfaces. Running the
+    // simulators on non-Amazon products would produce misleading output, so we
+    // skip surfacing entirely for the generic platform path. The frontend
+    // SurfacingGrid already hides cleanly when no questions arrive.
     const surfacingStart = Date.now();
-    writer.send("phase", { phase: "surfacing" });
     const surfaceResults: SurfaceResult[] = [];
     let surfacingQuestionCount = 0;
 
-    for await (const event of streamSurfacing(product, competitors, controller.signal)) {
-      if (writer.isClosed()) break;
-      if (event.type === "questions") {
-        surfacingQuestionCount = event.data.questions.length;
-        writer.send("surfacing-questions", { questions: event.data.questions });
-      } else if (event.type === "cell-start") {
-        writer.send("surfacing-cell-start", {
-          question: event.data.question,
-          surface: event.data.surface,
-        });
-      } else if (event.type === "cell-result") {
-        surfaceResults.push(event.data);
-        writer.send("surfacing-cell-result", event.data);
-      } else if (event.type === "done") {
-        writer.send("surfacing-complete", { results: event.data.results });
+    if (parsed.platform !== "amazon") {
+      logger.info(
+        { requestId, asin, platform: parsed.platform },
+        "sse.handler: skipping surfacing on non-Amazon platform",
+      );
+    } else {
+      writer.send("phase", { phase: "surfacing" });
+      for await (const event of streamSurfacing(product, competitors, controller.signal)) {
+        if (writer.isClosed()) break;
+        if (event.type === "questions") {
+          surfacingQuestionCount = event.data.questions.length;
+          writer.send("surfacing-questions", { questions: event.data.questions });
+        } else if (event.type === "cell-start") {
+          writer.send("surfacing-cell-start", {
+            question: event.data.question,
+            surface: event.data.surface,
+          });
+        } else if (event.type === "cell-result") {
+          surfaceResults.push(event.data);
+          writer.send("surfacing-cell-result", event.data);
+        } else if (event.type === "done") {
+          writer.send("surfacing-complete", { results: event.data.results });
+        }
       }
     }
 
