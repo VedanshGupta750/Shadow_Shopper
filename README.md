@@ -2,7 +2,7 @@
 
 AI agent that audits Amazon listings through 10 synthetic buyer personas. Scrapes the listing (ScraperAPI), runs all 10 personas in parallel via Azure OpenAI GPT-4o, simulates how Rufus + ChatGPT shopping mode would surface it, synthesizes a "why customers don't buy" report with revenue-at-risk estimate, and generates paste-ready Seller-Central copy for each conversion lever.
 
-**Live demo:** _TODO: paste Vercel URL after deploy_
+**Live demo:** [shadow-shopper.vercel.app](https://shadow-shopper.vercel.app)
 
 ## Stack
 
