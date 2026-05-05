@@ -1,6 +1,8 @@
 # Shadow Shopper
 
-> **10 synthetic buyer personas walk your Amazon listing in real time and tell you why customers aren't buying — ranked by revenue at risk. Each fix comes with paste-ready Seller Central copy.**
+> **10 synthetic buyer personas walk an e-commerce listing in real time and tell you why customers aren't buying — ranked by revenue at risk. Each fix comes with paste-ready copy.**
+>
+> **Best on Amazon (any TLD).** Also accepts any other product URL — Flipkart, Meesho, Myntra, AJIO, Nykaa, etc. — via a generic JSON-LD / OpenGraph fallback, with a clearly-labeled degraded mode.
 
 | | |
 |---|---|
@@ -19,6 +21,7 @@
 
 - [Why this exists](#why-this-exists)
 - [What you see in 90 seconds](#what-you-see-in-90-seconds)
+- [Supported platforms](#supported-platforms)
 - [Architecture](#architecture)
 - [Tech stack](#tech-stack)
 - [Features](#features)
@@ -62,6 +65,38 @@ You can also type a **custom buyer question** below the surfacing grid and we'll
 
 ---
 
+## Supported platforms
+
+The pipeline routes by URL hostname into one of two paths.
+
+### Amazon — full pipeline
+
+Any of these TLDs run the full structured-data pipeline. Reviews, competitor search, AI Surfacing audit, all 10 personas, synthesis, Generate Fix.
+
+`amazon.com` · `amazon.in` · `amazon.co.uk` · `amazon.de` · `amazon.fr` · `amazon.it` · `amazon.es` · `amazon.ca` · `amazon.com.au` · `amazon.co.jp` · `amazon.com.mx` · `amazon.com.br` · `amazon.nl` · `amazon.se` · `amazon.pl` · `amazon.sa` · `amazon.ae` · `amazon.eg` · `amazon.com.tr` · `amazon.sg`
+
+### Other platforms — degraded mode (honest)
+
+Any other product URL is accepted and runs through a generic JSON-LD / OpenGraph fallback scraper — **no per-platform DOM selectors** by design. We never special-case Flipkart vs Meesho vs Myntra; whatever structured data the page exposes (`<script type="application/ld+json">` with `@type: "Product"`, or `<meta property="og:*">` tags) is what we get. Tested against Flipkart, Meesho, Myntra, AJIO, and Nykaa.
+
+The frontend shows a yellow banner above results when a non-Amazon URL is loaded, calling out the limitations honestly:
+
+| | Amazon path | Generic path |
+|---|---|---|
+| Product details (name, price, brand, image, bullets) | ✅ Full | ✅ Whatever the page exposes via JSON-LD / OG |
+| Reviews | ✅ Up to 100 | ❌ No standard schema for review bodies |
+| Competitor search | ✅ 8 results | ❌ No per-platform search API |
+| AI Surfacing audit (Rufus + ChatGPT) | ✅ 5×2 grid | ❌ Skipped — Rufus is Amazon-specific |
+| 10 buyer personas | ✅ | ⚠️ Run, but tuned for Amazon shopping habits — banner says results are directional |
+| Synthesis report | ✅ | ⚠️ Same — Amazon-flavored levers may not apply |
+| Generate Fix | ✅ Paste-ready Seller Central copy | ⚠️ Generates copy, but format is Seller Central, not Flipkart Seller Hub etc. |
+| History drawer | ✅ | ✅ |
+| Custom buyer questions | ✅ | ❌ Hidden along with the surfacing card |
+
+**Why we don't ship per-platform scrapers.** Brittle (HTML changes every release), TOS risk (most platforms ban automated scraping), and once the URL parser is platform-agnostic the analysis layer's Amazon-tilt becomes the harder problem anyway. Documented as a deliberate trade-off in [DECISIONS.md](DECISIONS.md).
+
+---
+
 ## Architecture
 
 ```
@@ -90,15 +125,31 @@ You can also type a **custom buyer question** below the surfacing grid and we'll
                          │   Trust-proxy=1, SIGTERM drain (30s)
                          └─────────────┬─────────────┘
                                        │
-              ┌────────────────────────┼─────────────────────┬──────────────────┐
-              ▼                        ▼                     ▼                  ▼
-       ┌─────────────┐        ┌──────────────────┐   ┌──────────────────┐ ┌─────────────────┐
-       │ ScraperAPI  │        │ Surfacing fan-out│   │ Persona fan-out  │ │ Synthesizer     │
-       │ /product    │        │ 5 questions      │   │ 10 personas      │ │ 1 GPT-4o call   │
-       │ /review     │        │ × 2 surfaces     │   │ in parallel      │ │ structured JSON │
-       │ /search     │        │ (Rufus + ChatGPT)│   │ (Promise.all)    │ │ revenue + fixes │
-       │ FS cache 7d │        │ p-limit(4)       │   │ token streaming  │ │                 │
-       └─────────────┘        └──────────────────┘   └──────────────────┘ └─────────────────┘
+              │
+              │ parseProductUrl(url) → { platform: "amazon" | "generic" }
+              │
+              ├──────────────────────────┬──────────────────────────────┐
+              ▼                          ▼                              ▼
+       ┌─────────────────┐      ┌──────────────────┐          (any other URL)
+       │ Amazon path     │      │ Generic path     │
+       │ ScraperAPI      │      │ ScraperAPI raw   │
+       │ /product        │      │ HTML + JSON-LD   │
+       │ /review (100)   │      │ Product parser   │
+       │ /search (8)     │      │ + OpenGraph fb   │
+       │ FS cache 7d     │      │ no per-platform  │
+       │                 │      │ selectors        │
+       └────────┬────────┘      └────────┬─────────┘
+                │                        │
+              ┌─┴────────────────────────┴────┐
+              ▼                               ▼
+       ┌──────────────────┐           ┌──────────────────┐ ┌─────────────────┐
+       │ Surfacing fan-out│           │ Persona fan-out  │ │ Synthesizer     │
+       │ 5 questions      │           │ 10 personas      │ │ 1 GPT-4o call   │
+       │ × 2 surfaces     │           │ in parallel      │ │ structured JSON │
+       │ (Rufus + ChatGPT)│           │ (Promise.all)    │ │ revenue + fixes │
+       │ p-limit(4)       │           │ token streaming  │ │                 │
+       │ AMAZON ONLY      │           │                  │ │                 │
+       └──────────────────┘           └──────────────────┘ └─────────────────┘
                                        │                     │                    │
                                        └─────────────────────┴────────────────────┘
                                                              │ all results
@@ -231,12 +282,13 @@ Readiness check — confirms env validation passed at boot.
 ```
 
 ### `POST /api/stream-personas`
-The main pipeline. Returns an SSE stream that runs scrape → surfacing → personas → synthesis → done. Holds the connection open for 30-90 seconds.
+The main pipeline. Returns an SSE stream that runs scrape → surfacing → personas → synthesis → done. Holds the connection open for 30-90 seconds. Accepts **any product URL** — Amazon TLDs run the full pipeline; other URLs run the generic-scrape variant (no surfacing, banner shown). Validation rejects only URLs that aren't parseable at all.
 
 **Request:**
 ```json
 { "productUrl": "https://www.amazon.com/dp/B00JEV5UI8" }
 ```
+Also accepted: `amazon.in`, `flipkart.com`, `meesho.com`, `myntra.com`, `nykaa.com`, `ajio.com`, etc.
 
 **Response:** `Content-Type: text/event-stream`. See [Streaming protocol](#streaming-protocol-sse) below for the full event list.
 
@@ -557,6 +609,7 @@ This is a directional diagnostic, not a measured tool. Documented in detail in [
 - **Revenue estimates are heuristic.** Anchored to listing-specific signals (review count tier, category baseline conversion, friction-driven conversion drop) but not measured against actual conversion data. The math is shown explicitly in the synthesis output's `reasoning` field — it's auditable, just not validated.
 - **Persona pool has coverage gaps.** No ESL shopper, no professional buyer, no B2B buyer, no power user. Personas outside their wheelhouse (Maya on a baby monitor) trigger low-confidence "outside my expertise" verdicts that the synthesizer deweights.
 - **Pipeline is text-only.** No image analysis, no A+ Content visual eval, no video assessment. The single biggest gap vs. an expert human listing reviewer.
+- **Non-Amazon platforms run in degraded mode.** Personas, conversion levers, and Generate-Fix copy are tuned for Amazon Seller Central. The frontend yellow banner says this explicitly when a Flipkart/Meesho/Myntra/etc. URL is loaded. Generic scrape gets you product details only — no reviews, no competitors, no surfacing audit. Output is directional, not authoritative for those platforms.
 - **Competitor scrape can be self-referential.** ScraperAPI's search often returns the same product under different sellers/colors/refurb states. The synthesizer prompt has guards against treating same-product different-seller as a category competitor, but the pattern still leaks through occasionally.
 - **History is single-device.** localStorage-backed, no account, no sync. Switch browser → empty history.
 - **Reviews fetch can 404.** ScraperAPI's `/review` endpoint returns 404 on some listings; we fall back gracefully but the personas see only aggregate ratings, not review text. The brief.ts file has a guard against citing "no reviews" as friction when the listing actually has thousands.

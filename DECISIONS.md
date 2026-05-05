@@ -62,6 +62,16 @@ Every major choice in Shadow Shopper, framed as a trade-off rather than a forego
 
 **Switch criteria:** We'd move to Next.js when we want shareable shadow-shopper.com/r/abc123 links that render the cached synthesis report server-side, OR when we add a marketing surface that needs SEO. Today neither is a priority.
 
+## Cross-platform support: We chose generic JSON-LD / OpenGraph fallback over per-platform scrapers
+
+**Context:** Users want to paste any e-commerce URL — Amazon, Flipkart, Meesho, Myntra, AJIO, Nykaa — not just Amazon. The original architecture only spoke ScraperAPI's structured Amazon endpoint, which doesn't exist for the others. Two real paths forward: write per-platform DOM scrapers (one for each site), or rely on the structured data sites already publish for SEO.
+
+**What we did:** Added one generic scraper that fetches the rendered HTML via ScraperAPI's general-purpose endpoint, parses `<script type="application/ld+json">` recursively for any node whose `@type` includes "Product" (per schema.org), and falls back to `<meta property="og:*">` and `product:*` meta tags. Zero per-platform CSS selectors, zero hardcoded class names, zero "if hostname === flipkart" conditionals beyond the routing decision (Amazon path vs generic path). Whatever the page exposes via web standards is what we get.
+
+**Trade-off:** On non-Amazon platforms we get product name, brand, price, image, description, and (if published) aggregate rating. We do NOT get individual reviews, competitor listings, or AI Surfacing audit (Rufus is Amazon-specific). The personas still run but their prompts are tuned for Amazon shopping habits — we acknowledge this honestly with a yellow banner in the UI rather than pretend otherwise. Sites that don't publish JSON-LD or OpenGraph metadata won't work at all (most major e-commerce sites do; some niche or aggressively-anti-bot ones don't).
+
+**Switch criteria:** We'd add a per-platform scraper (Flipkart-specific selectors, Meesho-specific selectors, etc.) when a single platform becomes load-bearing for users AND the structured-data fallback is producing visibly degraded analysis on it. We will NOT swap the Amazon path's ScraperAPI structured endpoints for the generic JSON-LD scraper — Amazon's structured endpoint gets us reviews, search, and a stable schema; the generic path is strictly the degraded-but-honest fallback.
+
 ## Rufus simulator: We chose GPT-4o style imitation over Playwright automation
 
 **Context:** Amazon Rufus has no public API. We need to score whether a given listing surfaces in Rufus answers across 5 natural-language buyer questions, plus a custom-question slot.
