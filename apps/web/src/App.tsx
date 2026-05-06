@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { toast } from "sonner";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 import { UrlBar, type UrlBarHandle } from "./components/UrlBar";
 import { PersonaGrid } from "./components/PersonaGrid";
 import { SurfacingGrid } from "./components/SurfacingGrid";
@@ -203,6 +204,7 @@ function App() {
         onLoad={handleLoadHistory}
         onAfterMutate={refreshHistoryCount}
       />
+      <SpeedInsights />
     </div>
   );
 }
